@@ -50,6 +50,10 @@ pub trait PlatformAccountRepository: Send + Sync {
     async fn update(&self, account: &PlatformAccount) -> DomainResult<()>;
     async fn get(&self, id: Uuid) -> DomainResult<Option<PlatformAccount>>;
     async fn list_for_channel(&self, channel_id: Uuid) -> DomainResult<Vec<PlatformAccount>>;
+    /// Every platform account in the workspace, regardless of channel —
+    /// backs the Integrations page and the Dashboard's platform-health
+    /// summary (sections 47/72) in one query rather than one per channel.
+    async fn list_for_workspace(&self, workspace_id: Uuid) -> DomainResult<Vec<PlatformAccount>>;
     /// The account "Add to Queue" should default to for this channel and
     /// platform (section 49) — the one flagged `default_target`, or the
     /// channel's only account on that platform if there is exactly one.
@@ -58,6 +62,23 @@ pub trait PlatformAccountRepository: Send + Sync {
         channel_id: Uuid,
         platform: Platform,
     ) -> DomainResult<Option<PlatformAccount>>;
+    /// Looks up an existing connection by the provider's own account id
+    /// (section 53/59) — used both to reject a duplicate connection and to
+    /// detect "you authorized a different account than before" on
+    /// reconnect.
+    async fn find_by_provider_identity(
+        &self,
+        workspace_id: Uuid,
+        platform: Platform,
+        provider_account_id: &str,
+    ) -> DomainResult<Option<PlatformAccount>>;
+    /// Every `Connected` account whose `access_expires_at` falls at or
+    /// before `before` — the token-lifecycle background job's work queue
+    /// (section 37/39).
+    async fn list_due_for_refresh(
+        &self,
+        before: DateTime<Utc>,
+    ) -> DomainResult<Vec<PlatformAccount>>;
 }
 
 #[async_trait]

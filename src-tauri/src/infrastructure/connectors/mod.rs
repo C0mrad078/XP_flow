@@ -1,30 +1,41 @@
-//! Stub `PlatformConnector` adapter. Every method returns
-//! `PlatformConnectorError::NotImplemented` — there is no real network
-//! call, no OAuth flow, no API client yet. Its purpose is to prove the
-//! `PlatformConnector` port (domain::ports::platform_connector) is actually
-//! satisfiable by all three platforms before Phase 2 fills in a real
-//! implementation per platform, and to give the Channels UI a stable
-//! contract to build against today.
+//! Real `PlatformConnector`/`PlatformAuthProvider` implementations per
+//! platform (section 35/36), plus `StubConnector` — now used specifically
+//! as the graceful-degradation fallback for a platform whose developer
+//! configuration is missing (section 65: "do not crash the whole
+//! application because one provider is not configured").
+
+pub mod kwai;
+pub mod tiktok;
+pub mod youtube;
 
 use async_trait::async_trait;
+use tokio::sync::oneshot;
 
+use crate::domain::auth_error::AuthError;
+use crate::domain::oauth::AuthSession;
 use crate::domain::platform::Platform;
+use crate::domain::platform_account::PlatformAccount;
+use crate::domain::ports::platform_auth_provider::PlatformAuthProvider;
 use crate::domain::ports::platform_connector::{PlatformConnector, PlatformConnectorError};
+use crate::domain::provider_identity::ConnectedIdentity;
 use crate::domain::publication::Publication;
 
+/// Wired in for a platform whose non-secret developer configuration
+/// (client id/key, or the Auth Broker itself) is unavailable at startup —
+/// every account-lifecycle call fails with a clear, typed
+/// `ProviderNotConfigured` rather than the app refusing to start or a
+/// panic reaching the user.
 pub struct StubConnector {
     platform: Platform,
+    reason: String,
 }
 
 impl StubConnector {
-    pub fn new(platform: Platform) -> Self {
-        Self { platform }
-    }
-
-    fn not_implemented<T>(&self) -> Result<T, PlatformConnectorError> {
-        Err(PlatformConnectorError::NotImplemented {
-            platform: self.platform,
-        })
+    pub fn new(platform: Platform, reason: impl Into<String>) -> Self {
+        Self {
+            platform,
+            reason: reason.into(),
+        }
     }
 }
 
@@ -34,61 +45,107 @@ impl PlatformConnector for StubConnector {
         self.platform
     }
 
-    async fn authenticate(&self) -> Result<String, PlatformConnectorError> {
-        self.not_implemented()
-    }
-
-    async fn disconnect(&self, _external_account_id: &str) -> Result<(), PlatformConnectorError> {
-        self.not_implemented()
-    }
-
-    async fn validate_session(
+    async fn validate_connection(
         &self,
-        _external_account_id: &str,
-    ) -> Result<bool, PlatformConnectorError> {
-        self.not_implemented()
+        _account: &PlatformAccount,
+    ) -> Result<ConnectedIdentity, AuthError> {
+        Err(AuthError::ProviderNotConfigured {
+            detail: self.reason.clone(),
+        })
+    }
+
+    async fn refresh_connection(
+        &self,
+        _account: &PlatformAccount,
+    ) -> Result<crate::domain::provider_identity::RefreshedCredentials, AuthError> {
+        Err(AuthError::ProviderNotConfigured {
+            detail: self.reason.clone(),
+        })
+    }
+
+    async fn disconnect(&self, _account: &PlatformAccount) -> Result<(), AuthError> {
+        Err(AuthError::ProviderNotConfigured {
+            detail: self.reason.clone(),
+        })
+    }
+
+    async fn get_profile(
+        &self,
+        _account: &PlatformAccount,
+    ) -> Result<ConnectedIdentity, AuthError> {
+        Err(AuthError::ProviderNotConfigured {
+            detail: self.reason.clone(),
+        })
     }
 
     async fn publish_video(
         &self,
         _publication: &Publication,
     ) -> Result<String, PlatformConnectorError> {
-        self.not_implemented()
+        Err(PlatformConnectorError::NotImplemented {
+            platform: self.platform,
+        })
     }
 
     async fn get_publication_status(
         &self,
         _remote_id: &str,
     ) -> Result<String, PlatformConnectorError> {
-        self.not_implemented()
+        Err(PlatformConnectorError::NotImplemented {
+            platform: self.platform,
+        })
     }
 
     async fn fetch_metrics(
         &self,
         _remote_id: &str,
     ) -> Result<serde_json::Value, PlatformConnectorError> {
-        self.not_implemented()
+        Err(PlatformConnectorError::NotImplemented {
+            platform: self.platform,
+        })
     }
 
     async fn fetch_comments(
         &self,
         _remote_id: &str,
     ) -> Result<serde_json::Value, PlatformConnectorError> {
-        self.not_implemented()
+        Err(PlatformConnectorError::NotImplemented {
+            platform: self.platform,
+        })
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// The `PlatformAuthProvider` counterpart to `StubConnector` — wired in
+/// for a platform whose configuration is missing so "Connect" fails with
+/// a clear `ProviderNotConfigured` instead of a panic or a silently
+/// missing button.
+pub struct StubAuthProvider {
+    platform: Platform,
+    reason: String,
+}
 
-    #[tokio::test]
-    async fn stub_connector_reports_not_implemented() {
-        for platform in Platform::ALL {
-            let connector = StubConnector::new(platform);
-            assert_eq!(connector.platform(), platform);
-            let err = connector.authenticate().await.unwrap_err();
-            assert!(matches!(err, PlatformConnectorError::NotImplemented { .. }));
+impl StubAuthProvider {
+    pub fn new(platform: Platform, reason: impl Into<String>) -> Self {
+        Self {
+            platform,
+            reason: reason.into(),
         }
+    }
+}
+
+#[async_trait]
+impl PlatformAuthProvider for StubAuthProvider {
+    fn platform(&self) -> Platform {
+        self.platform
+    }
+
+    async fn authenticate(
+        &self,
+        _session: AuthSession,
+        _cancel: oneshot::Receiver<()>,
+    ) -> Result<ConnectedIdentity, AuthError> {
+        Err(AuthError::ProviderNotConfigured {
+            detail: self.reason.clone(),
+        })
     }
 }

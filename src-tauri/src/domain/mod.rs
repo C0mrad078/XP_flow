@@ -4,17 +4,23 @@
 
 pub mod activity_event;
 pub mod app_settings;
+pub mod auth_error;
+pub mod capability;
 pub mod channel;
+pub mod connection_health;
 pub mod duplicate_match;
 pub mod errors;
 pub mod media_error;
 pub mod notification;
+pub mod oauth;
 pub mod platform;
 pub mod platform_account;
 pub mod ports;
+pub mod provider_identity;
 pub mod publication;
 pub mod publication_query;
 pub mod queue_item;
+pub mod readiness;
 pub mod schedule_exception;
 pub mod schedule_slot;
 pub mod scheduling;

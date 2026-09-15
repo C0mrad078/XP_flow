@@ -1,7 +1,6 @@
 use tauri::State;
 use uuid::Uuid;
 
-use crate::domain::platform::Platform;
 use crate::domain::platform_account::PlatformAccount;
 use crate::error::AppError;
 use crate::state::AppState;
@@ -18,14 +17,13 @@ pub async fn list_platform_accounts(
 }
 
 #[tauri::command]
-pub async fn create_platform_account(
+pub async fn list_platform_accounts_for_workspace(
     state: State<'_, AppState>,
-    channel_id: Uuid,
-    platform: Platform,
-) -> Result<PlatformAccount, AppError> {
+    workspace_id: Uuid,
+) -> Result<Vec<PlatformAccount>, AppError> {
     Ok(state
         .platform_account_service
-        .create(channel_id, platform)
+        .list_for_workspace(workspace_id)
         .await?)
 }
 
@@ -35,4 +33,16 @@ pub async fn set_default_platform_account(
     id: Uuid,
 ) -> Result<PlatformAccount, AppError> {
     Ok(state.platform_account_service.set_default(id).await?)
+}
+
+#[tauri::command]
+pub async fn reassign_platform_account_channel(
+    state: State<'_, AppState>,
+    id: Uuid,
+    new_channel_id: Uuid,
+) -> Result<PlatformAccount, AppError> {
+    Ok(state
+        .platform_account_service
+        .reassign_channel(id, new_channel_id)
+        .await?)
 }

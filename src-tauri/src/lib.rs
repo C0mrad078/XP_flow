@@ -142,8 +142,9 @@ pub fn run() {
             commands::schedule_slot_commands::remove_schedule_exception,
             commands::schedule_slot_commands::list_schedule_exceptions,
             commands::platform_account_commands::list_platform_accounts,
-            commands::platform_account_commands::create_platform_account,
+            commands::platform_account_commands::list_platform_accounts_for_workspace,
             commands::platform_account_commands::set_default_platform_account,
+            commands::platform_account_commands::reassign_platform_account_channel,
         ]);
 
     let builder = commands::media_protocol::register(builder);

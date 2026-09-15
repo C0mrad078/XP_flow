@@ -36,8 +36,9 @@ impl std::str::FromStr for ChannelStatus {
 }
 
 /// A `Channel` groups a niche/brand of content together across platforms.
-/// One channel can eventually hold one `PlatformAccount` per platform
-/// (YouTube, TikTok, Kwai).
+/// A channel can hold one or more `PlatformAccount`s per platform (YouTube,
+/// TikTok, Kwai) — `PlatformAccount::default_target` picks which one
+/// "Add to Queue" defaults to when more than one exists.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Channel {
     pub id: Uuid,
