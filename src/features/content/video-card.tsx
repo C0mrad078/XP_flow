@@ -35,6 +35,7 @@ export interface VideoCardProps {
 export function VideoCard({ video, channelName, selected, onToggleSelect }: VideoCardProps) {
   const openDetail = useContentStore((state) => state.openDetail);
   const openQuickPreview = useContentStore((state) => state.openQuickPreview);
+  const openAddToQueue = useContentStore((state) => state.openAddToQueue);
   const actions = useVideoActions(video);
 
   return (
@@ -105,12 +106,12 @@ export function VideoCard({ video, channelName, selected, onToggleSelect }: Vide
                       label="Add to queue"
                       size="sm"
                       className="bg-black/40 text-white hover:bg-black/60"
-                      disabled
+                      onClick={() => openAddToQueue([video.id])}
                     >
                       <Plus className="size-3.5" />
                     </IconButton>
                   </TooltipTrigger>
-                  <TooltipContent>Add to queue — coming in Phase 3</TooltipContent>
+                  <TooltipContent>Add to queue</TooltipContent>
                 </Tooltip>
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
