@@ -3,6 +3,9 @@
 //! on this module (Rule 4).
 
 pub mod connectors;
+pub mod filesystem;
+pub mod hashing;
 pub mod logging;
 pub mod media;
 pub mod repositories;
+pub mod watcher;
