@@ -190,6 +190,35 @@ impl JobRunner {
         });
     }
 
+    /// Section 39: the `RefreshPlatformCredentialsJob` vocabulary,
+    /// running on this same `JobRunner`-owned background task model
+    /// rather than a second worker system — checks for soon-to-expire
+    /// platform credentials and refreshes them (section 37/38's refresh
+    /// buffer) on a timer. Takes `token_lifecycle` as a parameter rather
+    /// than a stored field so `JobRunner` doesn't need to know anything
+    /// about platform authentication beyond "run this periodically."
+    pub fn spawn_periodic_token_refresh(
+        self: Arc<Self>,
+        token_lifecycle: Arc<crate::application::token_lifecycle_service::TokenLifecycleService>,
+        interval: Duration,
+    ) {
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            loop {
+                ticker.tick().await;
+                let summary = token_lifecycle.refresh_expiring_accounts().await;
+                if summary.refreshed > 0 || summary.failed > 0 {
+                    tracing::info!(
+                        refreshed = summary.refreshed,
+                        failed = summary.failed,
+                        skipped = summary.skipped,
+                        "periodic token refresh sweep completed"
+                    );
+                }
+            }
+        });
+    }
+
     // ---------------------------------------------------------------
     // Folder watcher dispatch
     // ---------------------------------------------------------------

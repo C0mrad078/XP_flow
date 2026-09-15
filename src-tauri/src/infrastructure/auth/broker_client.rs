@@ -59,6 +59,7 @@ struct BrokerErrorBody {
 /// route it calls is hardcoded here — this client never accepts an
 /// arbitrary URL from a caller, matching the broker's own no-generic-proxy
 /// rule from the other direction (section 25).
+#[derive(Clone)]
 pub struct BrokerClient {
     http: reqwest::Client,
     base_url: String,

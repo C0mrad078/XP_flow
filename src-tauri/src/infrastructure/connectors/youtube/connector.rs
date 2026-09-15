@@ -159,6 +159,14 @@ impl PlatformConnector for YouTubeConnector {
         })
     }
 
+    async fn store_local_credential(
+        &self,
+        account_id: uuid::Uuid,
+        credential: &LocalCredential,
+    ) -> Result<(), AuthError> {
+        self.store_credential(account_id, credential).await
+    }
+
     async fn publish_video(
         &self,
         _publication: &Publication,

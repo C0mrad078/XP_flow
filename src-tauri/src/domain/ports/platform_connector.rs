@@ -61,6 +61,20 @@ pub trait PlatformConnector: Send + Sync {
 
     async fn get_profile(&self, account: &PlatformAccount) -> Result<ConnectedIdentity, AuthError>;
 
+    /// Persists a freshly-obtained local credential — YouTube only
+    /// overrides this (its tokens live in the OS keychain); brokered
+    /// providers' tokens never leave the Auth Broker, so the default no-op
+    /// is correct for them (`PlatformAuthService` calls this generically
+    /// right after a successful authorization, never knowing which
+    /// provider actually needs it).
+    async fn store_local_credential(
+        &self,
+        _account_id: uuid::Uuid,
+        _credential: &crate::domain::provider_identity::LocalCredential,
+    ) -> Result<(), AuthError> {
+        Ok(())
+    }
+
     // --- Phase 5 seam: defined now, deliberately unimplemented (section 112) ---
     async fn publish_video(
         &self,

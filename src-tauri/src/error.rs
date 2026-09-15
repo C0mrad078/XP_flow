@@ -1,5 +1,6 @@
 use serde::Serialize;
 
+use crate::domain::auth_error::AuthError;
 use crate::domain::errors::DomainError;
 use crate::domain::media_error::MediaError;
 use crate::domain::ports::platform_connector::PlatformConnectorError;
@@ -157,5 +158,37 @@ impl From<PlatformConnectorError> for AppError {
             "This platform integration isn't available yet.",
             err.to_string(),
         )
+    }
+}
+
+/// Section 69: every provider/broker failure normalizes through
+/// `AuthError` first (never a raw provider JSON body or broker response
+/// reaching this boundary) — this only maps that already-normalized
+/// taxonomy onto the coarse `ErrorCode` the frontend switches on, the same
+/// pattern every other `From<...> for AppError` impl here follows. The
+/// specific `AuthError::code()` string (e.g. `"AUTH_STATE_MISMATCH"`)
+/// stays in `developer_message`, consistent with how `MediaError`/
+/// `PlatformConnectorError` are handled above.
+impl From<AuthError> for AppError {
+    fn from(err: AuthError) -> Self {
+        let code = match &err {
+            AuthError::AuthCancelled
+            | AuthError::AuthTimeout
+            | AuthError::AuthStateMismatch
+            | AuthError::AuthCodeInvalid
+            | AuthError::AccountIdentityMismatch { .. }
+            | AuthError::PermissionMissing { .. } => ErrorCode::Validation,
+            AuthError::TokenRevoked | AuthError::PermissionDenied => ErrorCode::Authentication,
+            AuthError::ProviderRateLimited { .. } => ErrorCode::RateLimit,
+            AuthError::NetworkOffline => ErrorCode::Network,
+            AuthError::ProviderUnavailable { .. } | AuthError::BrokerUnavailable => {
+                ErrorCode::Platform
+            }
+            AuthError::TokenExchangeFailed { .. }
+            | AuthError::TokenRefreshFailed { .. }
+            | AuthError::BrokerConfigurationError { .. }
+            | AuthError::ProviderNotConfigured { .. } => ErrorCode::Internal,
+        };
+        AppError::new(code, err.user_message(), format!("[{}] {err}", err.code()))
     }
 }

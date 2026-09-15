@@ -127,3 +127,11 @@ impl AuthError {
         )
     }
 }
+
+impl From<super::errors::DomainError> for AuthError {
+    fn from(err: super::errors::DomainError) -> Self {
+        AuthError::TokenExchangeFailed {
+            detail: err.to_string(),
+        }
+    }
+}

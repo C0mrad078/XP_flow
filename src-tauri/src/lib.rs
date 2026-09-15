@@ -19,21 +19,34 @@ use application::channel_service::ChannelService;
 use application::content_service::ContentService;
 use application::media_ingestion_service::MediaIngestionService;
 use application::platform_account_service::PlatformAccountService;
+use application::platform_auth_service::PlatformAuthService;
 use application::publication_service::PublicationService;
 use application::schedule_slot_service::ScheduleSlotService;
 use application::scheduler_service::SchedulerService;
 use application::settings_service::SettingsService;
 use application::source_service::SourceService;
+use application::token_lifecycle_service::TokenLifecycleService;
 use application::workspace_service::WorkspaceService;
 use domain::activity_event::{ActivityCategory, ActivityLevel};
+use domain::platform::Platform;
 use domain::ports::hashing::{ContentHashService, PerceptualHashService};
 use domain::ports::media_service::{MediaProbeService, MediaService, ThumbnailService};
+use domain::ports::platform_auth_provider::PlatformAuthProvider;
+use domain::ports::platform_connector::PlatformConnector;
 use domain::ports::repositories::{
     ActivityRepository, ChannelRepository, DuplicateMatchRepository, NotificationRepository,
     PlatformAccountRepository, PublicationRepository, QueueItemRepository,
     ScheduleExceptionRepository, ScheduleSlotRepository, SettingsRepository, VideoRepository,
     VideoSourceRepository, WorkspaceRepository,
 };
+use infrastructure::auth::{AuthBrokerConfig, BrokerClient};
+use infrastructure::connectors::kwai::{KwaiAuthProvider, KwaiConnector};
+use infrastructure::connectors::tiktok::{TikTokAuthConfig, TikTokAuthProvider, TikTokConnector};
+use infrastructure::connectors::youtube::api_client::YouTubeApiClient;
+use infrastructure::connectors::youtube::{
+    YouTubeAuthConfig, YouTubeAuthProvider, YouTubeConnector,
+};
+use infrastructure::connectors::{StubAuthProvider, StubConnector};
 use infrastructure::hashing::{DHashPerceptualHashService, Sha256ContentHashService};
 use infrastructure::media::{FfmpegMediaService, FfmpegThumbnailService, FfprobeMediaProbeService};
 use infrastructure::repositories::{
@@ -46,6 +59,7 @@ use infrastructure::repositories::{
 use infrastructure::watcher::FolderWatcherService;
 use jobs::JobRepository;
 use platform::paths::AppPaths;
+use platform::secure_storage_keyring::KeyringSecureStorage;
 use services::job_runner::JobRunner;
 use services::media_status_service::MediaStatusService;
 use services::notification_service::NotificationService;
@@ -56,6 +70,14 @@ use tauri::Manager;
 /// handles almost everything; this exists only to catch filesystem events
 /// the OS watcher might have dropped.
 const PERIODIC_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// Section 39: how often the background sweep checks for platform
+/// credentials nearing expiry. Refreshing is cheap and idempotent
+/// (section 38's buffer means nothing is actually due most sweeps), so a
+/// relatively tight interval costs nothing while keeping the window
+/// between "a token could have been refreshed" and "it actually was"
+/// small.
+const TOKEN_REFRESH_SWEEP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -235,7 +257,137 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         schedule_exception_repo,
         activity_service.clone(),
     ));
-    let platform_account_service = Arc::new(PlatformAccountService::new(platform_account_repo));
+    let platform_account_service =
+        Arc::new(PlatformAccountService::new(platform_account_repo.clone()));
+
+    // --- Phase 4: platform authentication ------------------------------
+    //
+    // Every provider degrades independently (section 65): missing
+    // developer configuration for one provider (or the Auth Broker being
+    // entirely unconfigured) never stops the app from starting — the
+    // affected platform's `PlatformAuthProvider`/`PlatformConnector` slot
+    // is filled with a `Stub*` that reports `ProviderNotConfigured`
+    // instead of the real implementation.
+    let secure_storage: Arc<dyn domain::ports::secure_storage::SecureStorage> =
+        Arc::new(KeyringSecureStorage::new());
+    let broker_config = AuthBrokerConfig::resolve();
+    let broker_client = broker_config.as_ref().map(BrokerClient::new);
+    if let Some(config) = &broker_config {
+        if !config.is_secure_enough() {
+            tracing::warn!(
+                base_url = config.base_url(),
+                "Auth Broker URL is not HTTPS and is not a loopback address — refusing to trust it for TikTok/Kwai"
+            );
+        }
+    }
+    let broker_client =
+        broker_client.filter(|_| broker_config.as_ref().is_some_and(|c| c.is_secure_enough()));
+
+    let youtube_config = YouTubeAuthConfig::resolve();
+    let tiktok_config = TikTokAuthConfig::resolve();
+
+    let mut auth_providers: std::collections::HashMap<Platform, Arc<dyn PlatformAuthProvider>> =
+        std::collections::HashMap::new();
+    let mut connectors: std::collections::HashMap<Platform, Arc<dyn PlatformConnector>> =
+        std::collections::HashMap::new();
+
+    match youtube_config {
+        Some(config) => {
+            auth_providers.insert(
+                Platform::YouTube,
+                Arc::new(YouTubeAuthProvider::new(config.clone())),
+            );
+            connectors.insert(
+                Platform::YouTube,
+                Arc::new(YouTubeConnector::new(
+                    YouTubeApiClient::new(config),
+                    secure_storage.clone(),
+                )),
+            );
+        }
+        None => {
+            tracing::warn!(
+                "YOUTUBE_CLIENT_ID not set — YouTube connections are unavailable in this build"
+            );
+            auth_providers.insert(
+                Platform::YouTube,
+                Arc::new(StubAuthProvider::new(
+                    Platform::YouTube,
+                    "YOUTUBE_CLIENT_ID is not configured",
+                )),
+            );
+            connectors.insert(
+                Platform::YouTube,
+                Arc::new(StubConnector::new(
+                    Platform::YouTube,
+                    "YOUTUBE_CLIENT_ID is not configured",
+                )),
+            );
+        }
+    }
+
+    match (&tiktok_config, &broker_client) {
+        (Some(config), Some(broker)) => {
+            auth_providers.insert(
+                Platform::TikTok,
+                Arc::new(TikTokAuthProvider::new(config.clone(), broker.clone())),
+            );
+            connectors.insert(
+                Platform::TikTok,
+                Arc::new(TikTokConnector::new(broker.clone())),
+            );
+        }
+        _ => {
+            let reason = if tiktok_config.is_none() {
+                "TIKTOK_CLIENT_KEY is not configured"
+            } else {
+                "the Auth Broker is not configured or not trusted"
+            };
+            tracing::warn!(reason, "TikTok connections are unavailable in this build");
+            auth_providers.insert(
+                Platform::TikTok,
+                Arc::new(StubAuthProvider::new(Platform::TikTok, reason)),
+            );
+            connectors.insert(
+                Platform::TikTok,
+                Arc::new(StubConnector::new(Platform::TikTok, reason)),
+            );
+        }
+    }
+
+    match &broker_client {
+        Some(broker) => {
+            auth_providers.insert(
+                Platform::Kwai,
+                Arc::new(KwaiAuthProvider::new(broker.clone())),
+            );
+            connectors.insert(Platform::Kwai, Arc::new(KwaiConnector::new(broker.clone())));
+        }
+        None => {
+            let reason = "the Auth Broker is not configured or not trusted";
+            tracing::warn!(reason, "Kwai connections are unavailable in this build");
+            auth_providers.insert(
+                Platform::Kwai,
+                Arc::new(StubAuthProvider::new(Platform::Kwai, reason)),
+            );
+            connectors.insert(
+                Platform::Kwai,
+                Arc::new(StubConnector::new(Platform::Kwai, reason)),
+            );
+        }
+    }
+
+    let platform_auth_service = Arc::new(PlatformAuthService::new(
+        auth_providers,
+        connectors,
+        platform_account_repo,
+        activity_service.clone(),
+        notification_service.clone(),
+    ));
+    let token_lifecycle_service = Arc::new(TokenLifecycleService::new(
+        Arc::new(SqlitePlatformAccountRepository::new(pool.clone())),
+        platform_auth_service.clone(),
+    ));
 
     let ingestion = Arc::new(MediaIngestionService::new(
         video_repo.clone(),
@@ -302,6 +454,10 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         job_runner
             .clone()
             .spawn_periodic_reconciliation(workspace.id, PERIODIC_RECONCILIATION_INTERVAL);
+        job_runner.clone().spawn_periodic_token_refresh(
+            token_lifecycle_service.clone(),
+            TOKEN_REFRESH_SWEEP_INTERVAL,
+        );
 
         // Queue reconciliation (section 91/113): catches queue/schedule
         // drift (e.g. an orphaned QueueItem left behind by a crash between
@@ -332,6 +488,8 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         scheduler_service,
         schedule_slot_service,
         platform_account_service,
+        platform_auth_service,
+        token_lifecycle_service,
         job_runner,
         video_repo,
         paths,
