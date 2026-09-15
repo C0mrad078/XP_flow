@@ -3,6 +3,9 @@
 This document explains how XP FLOW is put together and, more importantly, _why_ — the constraints each layer exists
 to enforce, so future phases extend this foundation instead of working around it.
 
+This covers Phase 1 (foundation/shell) and Phase 2 (media library). See `docs/media-library.md` for a deeper dive on
+the ingestion pipeline, folder watching, duplicate detection and caching specifically.
+
 ## 1. High-level shape
 
 ```text
@@ -45,15 +48,27 @@ src/
 ├── features/        One folder per screen (dashboard/, today/, queue/, content/, channels/, activity/, settings/, ...)
 ├── development/
 │   └── mock-data/    Mock data for screens not yet wired to real persistence — isolated so it's trivial to delete
-├── hooks/            Cross-feature React hooks (e.g. useAppInfo)
+├── hooks/            Cross-feature React hooks (e.g. useAppInfo) + TanStack Query hooks (use-content, use-sources, ...)
 ├── lib/
 │   ├── tauri/        The ONLY files that import @tauri-apps/api — a typed client per backend domain
-│   ├── formatting/   Date/number/duration/byte formatters (UTC → local conversion lives here, nowhere else)
-│   └── utilities/    cn() (Tailwind class merge), feature flags, theme resolution, seeded-gradient thumbnails
-├── stores/           Zustand stores — one per concern (settings, workspace, notifications, toasts, ui)
+│   ├── formatting/   Date/number/duration/byte/media formatters (UTC → local conversion lives here, nowhere else)
+│   ├── query-client.ts  Shared TanStack QueryClient — backend-derived state goes through Query, not Zustand
+│   └── utilities/    cn() (Tailwind class merge), feature flags, theme resolution, seeded-gradient thumbnails, media-url (xpflowmedia:// URL builders)
+├── stores/           Zustand stores — one per concern (settings, workspace, notifications, toasts, ui, content — the
+│                     latter is UI-only: view mode/filters/selection, never a copy of server data, section 71)
 ├── styles/            globals.css — every design token, Tailwind v4 @theme config
-└── types/domain.ts   Hand-mirrored TypeScript types for every Rust domain type serialized over IPC
+└── types/domain.ts, media.ts   Hand-mirrored TypeScript types for every Rust type serialized over IPC
 ```
+
+### Server state vs. UI state (section 71)
+
+Anything that originates on the backend — the Content Library, folder sources, channels — is fetched and cached with
+**TanStack Query** (`hooks/use-content.ts`, `use-sources.ts`, `use-channels.ts`), never copied into a Zustand store.
+`stores/content-store.ts` holds only interaction state that has no server representation: which view mode is active,
+the current filter/sort/page selection, which video ids are checked, and which video's details/quick-preview panel is
+open. Mutations (`useUpdateVideo`, `useBulkUpdateVideos`, ...) invalidate the relevant query keys on success rather
+than hand-rolling optimistic cache patches — simpler, and correct by construction since the next fetch is always the
+source of truth.
 
 ### Why a typed IPC layer
 
@@ -84,21 +99,34 @@ reaches for a raw hex value — see `docs/development-guidelines.md` for the enf
 ```text
 src-tauri/src/
 ├── domain/            Entities + value objects + ports (traits). Zero dependencies on anything below this line.
-│   └── ports/          Trait contracts: repositories, SecureStorage, PlatformConnector, MediaService
-├── application/        Use-case orchestration that Tauri commands call directly (WorkspaceService, SettingsService, ActivityService)
-├── services/           Cross-cutting technical services that aren't tied to one aggregate (MediaStatusService, NotificationService)
+│   └── ports/          Trait contracts: repositories, SecureStorage, PlatformConnector, MediaService, MediaProbeService,
+│                        ThumbnailService, ContentHashService, PerceptualHashService
+├── application/        Use-case orchestration that Tauri commands call directly: WorkspaceService, SettingsService,
+│                        ActivityService, ChannelService, SourceService, ContentService, MediaIngestionService (the
+│                        single ingestion pipeline every import path converges on — see docs/media-library.md §1)
+├── services/           Cross-cutting technical services: MediaStatusService, NotificationService, JobRunner (the
+│                        concurrency/orchestration layer on top of MediaIngestionService — bounded-concurrency import,
+│                        folder-watcher dispatch, startup/periodic reconciliation — see docs/media-library.md §2-3)
 ├── infrastructure/      Concrete adapters implementing domain ports
 │   ├── repositories/    SQLx implementations of the repository traits — the only place SQL is written
 │   ├── connectors/       Stub PlatformConnector (YouTube/TikTok/Kwai) — proves the contract, returns NotImplemented
-│   ├── media/            FFmpeg/FFprobe detection
+│   ├── media/            FFmpeg/FFprobe detection, binary resolution, structured probing, thumbnail extraction
+│   ├── hashing/          SHA-256 content hashing (streamed) and dHash perceptual hashing
+│   ├── filesystem/       File-stability detection, path normalization, cache accounting, reveal-in-file-manager
+│   ├── watcher/          Cross-platform multi-root folder watching (notify + notify-debouncer-full)
 │   └── logging/          tracing-subscriber setup (console + rotating JSON file)
 ├── platform/            The only code allowed to know about the OS: data-directory resolution, OS keychain backend
 ├── persistence/          SQLite pool creation + migration bootstrap (sqlx::migrate!)
-├── jobs/                 Job/JobType/JobStatus vocabulary — no scheduler/worker pool yet
-├── commands/             Tauri IPC handlers — extract State<AppState>, call one application service method, map the result
+├── jobs/                 Job/JobType/JobStatus/JobRepository — persisted and executed for real by JobRunner as of
+│                        Phase 2 (ingestion/scan/reconcile job types); publishing job types remain unused placeholders
+├── commands/             Tauri IPC handlers — extract State<AppState>, call one application service method, map the
+│                        result — plus commands::media_protocol, a custom xpflowmedia:// URI scheme for local preview
 ├── state.rs              AppState: every application service + services, assembled once at startup
 ├── error.rs              AppError: stable error code + separate developer/user-facing messages
-└── lib.rs                Wires everything: resolves paths → opens DB → runs migrations → builds AppState → registers commands
+├── test_support.rs       (cfg(test) only) fake MediaProbeService/ThumbnailService/hashing implementations so the
+│                        ingestion pipeline can be tested without FFmpeg installed — see docs/media-library.md
+└── lib.rs                Wires everything: resolves paths → opens DB → runs migrations → builds AppState → starts the
+                         folder watcher and reconciliation → registers commands and the media protocol
 ```
 
 ### Why domain/application/infrastructure are separate crates-in-spirit
@@ -157,9 +185,13 @@ later.
 ### Job foundation
 
 `jobs::job` defines `Job`, `JobType` (`ValidateVideo`, `PublishVideo`, `CollectMetrics`, `FetchComments`,
-`GenerateThumbnail`, `Backup`, `Cleanup`) and `JobStatus` (`Pending`, `Running`, `Succeeded`, `Failed`, `Cancelled`).
-Nothing schedules or executes a `Job` yet — there is no worker pool, no polling loop, no persistence table for jobs.
-This is deliberately just the vocabulary Phase 2's Tokio-based job runner will use.
+`GenerateThumbnail`, `Backup`, `Cleanup`, plus Phase 2's `ScanFolder`/`IngestVideo`/`ReconcileSource`) and `JobStatus`
+(`Pending`, `Running`, `Succeeded`, `Failed`, `Cancelled`), persisted via `jobs::JobRepository`. As of Phase 2, the
+media-ingestion job types actually run: `services::job_runner::JobRunner` enqueues an `IngestVideo` job (with a
+path-derived dedupe key) for every file the folder watcher discovers, bounds concurrency with a 3-permit semaphore,
+and recovers any job left `running` by a killed process back to `failed` on the next startup. The publishing-related
+job types (`PublishVideo`, `CollectMetrics`, `FetchComments`) remain unused placeholders until a future phase adds
+real platform integrations. See `docs/media-library.md` §3 for the idempotency/crash-recovery details.
 
 ## 4. Database
 
@@ -171,8 +203,16 @@ every startup (`open → check migrations → apply pending → continue`). A mi
 All primary keys are UUID v4 stored as `TEXT`. All timestamps are stored as RFC 3339 UTC strings and are converted to
 the user's local timezone only in `src/lib/formatting/date.ts` — nowhere else formats a timestamp for display.
 
-See `0001_init.sql` for the full schema: `workspaces`, `channels`, `platform_accounts`, `videos`, `video_sources`,
-`publications`, `queue_items`, `schedule_slots`, `templates`, `activity_events`, `notifications`, `app_settings`.
+`0001_init.sql` establishes the Phase 1 schema: `workspaces`, `channels`, `platform_accounts`, `publications`,
+`queue_items`, `schedule_slots`, `templates`, `activity_events`, `notifications`, `app_settings`.
+
+`0002_media_library.sql` (Phase 2) recreates `videos` and `video_sources` with the expanded media-library shape (see
+`docs/media-library.md`), and adds `duplicate_matches` and `jobs`. Recreating rather than `ALTER`ing was safe because
+no production data existed yet; see the migration file's header comment for the reasoning. `video_sources` changed
+meaning between phases — Phase 1's per-video provenance record became Phase 2's folder-source configuration (name,
+`folder_path`, `channel_id`, `recursive`, `watch_enabled`, `last_scan_at`, `last_error`) per section 8 of the Phase 2
+brief; every workspace gets an implicit `manual_import`-type source for file-dialog/drag-and-drop imports that aren't
+tied to a folder.
 
 ## 5. IPC contract
 
@@ -180,13 +220,31 @@ Every `#[tauri::command]` function is registered once, in `lib.rs::run()`'s `inv
 calls `invoke("some_command_name")` directly outside `src/lib/tauri/` — see
 `docs/development-guidelines.md` for why that boundary is enforced.
 
-## 6. What Phase 2+ is expected to add on top of this
+Local video/thumbnail preview is the one exception to plain `invoke()`: `commands::media_protocol` registers a custom
+`xpflowmedia://` URI scheme (`register_asynchronous_uri_scheme_protocol`) that resolves a video id to a file path
+server-side and streams bytes back with HTTP `Range` support. The frontend requests
+`https://xpflowmedia.localhost/video/<id>` (or `.../thumbnail/<id>`) as a plain `<video>`/`<img>` `src` — it never
+receives or constructs a filesystem path (section 89 of the Phase 2 brief).
+
+## 6. What Phase 2 added
+
+- The full local media ingestion pipeline (`MediaIngestionService`), folder watching and reconciliation (`JobRunner`,
+  `FolderWatcherService`), exact/near-duplicate detection, and a working Content Library UI. See
+  `docs/media-library.md` for the detail.
+- Real `ChannelService`/`list_channels`/`create_channel` (list + create only) so the channel-assignment pickers this
+  phase needed have real UUIDs to work with — the full Channels _screen_ is still Phase 1's mock UI.
+- `VideoRepository`/`ContentService` now back a real screen (Content); `PublicationRepository` is still unused by any
+  UI — Queue stays mock/placeholder until a future phase implements real scheduling (section 97).
+
+## 7. What a future phase is expected to add on top of this
 
 - Real `PlatformConnector` implementations (OAuth flows, upload APIs, metrics/comment sync) behind the existing
   trait — no changes to `domain` or `commands` should be required.
-- A job scheduler consuming the `jobs::Job` vocabulary, running on Tokio tasks with graceful shutdown.
-- A `jobs` persistence table and repository, following the same pattern as every other entity.
-- Cut.pro folder watching, real thumbnail/transcode generation via the `MediaService` port.
-- Wiring `ChannelRepository`/`VideoRepository`/`PublicationRepository` (already implemented against real SQLite) into
-  the Channels/Content/Queue screens in place of `development/mock-data`.
+- A real queue/scheduler consuming `QueueItem`/`ScheduleSlot` and the `PublishVideo`/`CollectMetrics`/`FetchComments`
+  job types (the `Job`/`JobRepository` foundation and its concurrency/idempotency patterns already exist and were
+  proven out by Phase 2's ingestion jobs).
+- Bundled FFmpeg/FFprobe binaries in packaged builds (the sidecar resolution order already exists —
+  `infrastructure::media::resolver` — nothing is bundled yet).
 - Calendar/Comments/Analytics/Automation screens, currently explicit placeholders.
+- Wiring the real Channels screen (health, platform connections) in place of its Phase 1 mock data, now that real
+  channel rows exist.

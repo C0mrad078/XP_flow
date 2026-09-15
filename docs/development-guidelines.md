@@ -29,6 +29,29 @@ boundaries themselves.
     a typed error (`AppError` on the backend, an `AppError`-shaped rejection on the frontend) — never swallowed with
     an empty `catch {}`.
 
+## Media/ingestion rules (Phase 2, section 96)
+
+11. **Every import goes through `MediaIngestionService::ingest_path`.** Manual import, drag-and-drop, folder-watcher
+    dispatch and reconciliation all call the exact same function (via `JobRunner`) — never write a second "create a
+    Video row" code path. If a new import source is added later, it should produce a list of paths and hand them to
+    the existing pipeline, not reimplement validation/hashing/thumbnailing.
+12. **XP FLOW never renames, moves, transcodes or deletes an original video file.** It reads, probes, hashes and
+    previews (section 65). "Remove from XP FLOW" deletes the database row and generated thumbnail only
+    (`ContentService::remove`) — confirm this behavior isn't changed without an explicit, separately-confirmed user
+    action.
+13. **FFprobe/FFmpeg are never called from the frontend.** They're shelled out to only inside
+    `infrastructure::media::*`, behind the `MediaProbeService`/`ThumbnailService` ports — React only ever sees the
+    typed `MediaProbe` result or a `MediaError`.
+14. **Never trust a file extension alone.** `is_supported_video_extension` gates which files even get a stability
+    check, but `validation_status` always comes from a real FFprobe result (`classify_validation`) — a `.mp4` that
+    fails to probe is `Invalid`/`Corrupted`, not assumed valid because of its name.
+15. **Never identify a video by filename or path.** Use the database id, and `content_hash` for identity/duplicate
+    checks — filenames get reused, paths move. `file_path` is tracked data, not an identity key (section 31).
+16. **Testing the ingestion pipeline never requires FFmpeg to be installed.** Use the fakes in
+    `src-tauri/src/test_support.rs` (`FakeProbeService`, `FakeThumbnailService`, `FakeHashService`,
+    `FakePerceptualHashService`) behind the same ports the real FFmpeg-backed services implement — see
+    `docs/media-library.md` for why.
+
 ## Frontend conventions
 
 - **Only `src/lib/tauri/*.ts` may import `@tauri-apps/api`.** Add a new backend feature by adding a typed wrapper
@@ -42,10 +65,12 @@ boundaries themselves.
   backend timestamp inside a component — use `formatDate`/`formatTime`/`formatRelativeTime`/etc., which handle the
   UTC → local conversion in one place.
 - **Mock data is isolated.** Anything under `src/development/mock-data/` is UI-only fixture data, typed separately
-  from real domain DTOs (`src/types/domain.ts`), and is expected to be deleted the moment the screen it backs is
-  wired to a real repository/command.
-- **State**: reach for a Zustand store (`src/stores/`) for state shared across components/routes; use local
-  `useState` for state that belongs to one component subtree.
+  from real domain DTOs (`src/types/domain.ts`, `src/types/media.ts`), and is expected to be deleted the moment the
+  screen it backs is wired to a real repository/command — `content.ts` was deleted this way when the Content Library
+  went real in Phase 2; `channels.ts`/`queue.ts` remain until Queue/the full Channels screen do the same.
+- **State**: backend-derived data goes through TanStack Query (`src/hooks/use-*.ts`), never copied into Zustand
+  (section 71) — reach for a Zustand store (`src/stores/`) only for state that has no server representation
+  (selection, view mode, which panel is open). Use local `useState` for state scoped to one component subtree.
 - **Feature flags**: gate not-yet-real functionality behind `src/lib/utilities/feature-flags.ts` rather than
   commenting code out or leaving a dead UI control.
 
