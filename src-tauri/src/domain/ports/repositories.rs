@@ -110,6 +110,12 @@ pub trait DuplicateMatchRepository: Send + Sync {
 pub trait PublicationRepository: Send + Sync {
     async fn create(&self, publication: &Publication) -> DomainResult<()>;
     async fn update(&self, publication: &Publication) -> DomainResult<()>;
+    /// Persists every publication in `publications` inside a single
+    /// database transaction — all-or-nothing. Used by bulk scheduling
+    /// operations (auto-schedule, rebuild, fill-gaps) so a mid-batch slot
+    /// conflict never leaves half the batch scheduled and half not
+    /// (section 85/113).
+    async fn bulk_update(&self, publications: &[Publication]) -> DomainResult<()>;
     async fn get(&self, id: Uuid) -> DomainResult<Option<Publication>>;
     async fn list_for_video(&self, video_id: Uuid) -> DomainResult<Vec<Publication>>;
     /// Any publication for this exact (video, channel, platform) triple
@@ -136,7 +142,11 @@ pub trait PublicationRepository: Send + Sync {
     /// `Scheduled` publications whose `scheduled_at` is at or before `now`
     /// — the due-publication query Phase 5's real uploader will consume
     /// (section 111), unused for actual publishing in Phase 3.
-    async fn list_due(&self, workspace_id: Uuid, now: DateTime<Utc>) -> DomainResult<Vec<Publication>>;
+    async fn list_due(
+        &self,
+        workspace_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> DomainResult<Vec<Publication>>;
     /// All unlocked, non-terminal, non-scheduled queue publications for a
     /// channel — the candidate pool the auto-scheduler draws from.
     async fn list_unscheduled_for_channel(
@@ -162,6 +172,11 @@ pub trait QueueItemRepository: Send + Sync {
         &self,
         workspace_id: Uuid,
     ) -> DomainResult<Vec<QueueItem>>;
+    /// Every `QueueItem` row in the workspace regardless of whether its
+    /// publication is scheduled — used only by reconciliation, which needs
+    /// to find rows whose publication has gone missing or terminal
+    /// (section 91/113), not just the unscheduled ones the UI cares about.
+    async fn list_all_for_workspace(&self, workspace_id: Uuid) -> DomainResult<Vec<QueueItem>>;
     async fn next_position(&self, workspace_id: Uuid) -> DomainResult<i64>;
 }
 

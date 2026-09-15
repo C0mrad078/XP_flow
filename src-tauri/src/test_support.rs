@@ -77,6 +77,44 @@ pub async fn seed_channel(pool: &SqlitePool, workspace_id: Uuid, name: &str) -> 
     channel_id
 }
 
+/// Inserts a minimal, valid `videos` row (bypassing the ingestion
+/// pipeline entirely) for tests that only care about queue/scheduler
+/// behavior downstream of "a video exists".
+pub async fn seed_video(
+    pool: &SqlitePool,
+    workspace_id: Uuid,
+    source_id: Uuid,
+    channel_id: Option<Uuid>,
+    title: &str,
+) -> Uuid {
+    let video = crate::domain::video::Video::new(
+        workspace_id,
+        source_id,
+        channel_id,
+        format!("{title}.mp4"),
+        title,
+        format!("/tmp/{title}.mp4"),
+        1024,
+        "mp4",
+    );
+    let repo = crate::infrastructure::repositories::SqliteVideoRepository::new(pool.clone());
+    use crate::domain::ports::repositories::VideoRepository;
+    repo.create(&video).await.unwrap();
+    video.id
+}
+
+/// Overwrites the workspace's timezone directly (bypassing
+/// `WorkspaceService::update_timezone`'s validation) for tests that need a
+/// specific IANA zone already in place.
+pub async fn set_workspace_timezone(pool: &SqlitePool, workspace_id: Uuid, timezone: &str) {
+    sqlx::query("UPDATE workspaces SET timezone = ? WHERE id = ?")
+        .bind(timezone)
+        .bind(workspace_id.to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
 /// Writes a tiny fake "video" file (real content doesn't matter — the
 /// fake probe/hash services below never actually decode it).
 pub fn write_fake_video(dir: &Path, filename: &str, bytes: &[u8]) -> PathBuf {

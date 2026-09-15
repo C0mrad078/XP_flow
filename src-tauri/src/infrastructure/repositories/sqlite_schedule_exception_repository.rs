@@ -34,9 +34,8 @@ fn row_to_exception(row: &sqlx::sqlite::SqliteRow) -> Result<ScheduleException, 
                 .map_err(map_repo_err)?,
         )
         .unwrap_or_default(),
-        date: NaiveDate::parse_from_str(&date, "%Y-%m-%d").map_err(|e| {
-            DomainError::Repository(format!("invalid stored date {date:?}: {e}"))
-        })?,
+        date: NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+            .map_err(|e| DomainError::Repository(format!("invalid stored date {date:?}: {e}")))?,
         kind: row
             .try_get::<String, _>("kind")
             .map_err(map_repo_err)?

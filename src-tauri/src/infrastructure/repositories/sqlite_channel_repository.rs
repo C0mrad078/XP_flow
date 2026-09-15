@@ -91,11 +91,13 @@ impl ChannelRepository for SqliteChannelRepository {
     }
 
     async fn get(&self, id: Uuid) -> DomainResult<Option<Channel>> {
-        let row = sqlx::query(&format!("SELECT {SELECT_COLUMNS} FROM channels WHERE id = ?"))
-            .bind(id.to_string())
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(map_repo_err)?;
+        let row = sqlx::query(&format!(
+            "SELECT {SELECT_COLUMNS} FROM channels WHERE id = ?"
+        ))
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_repo_err)?;
         row.as_ref().map(row_to_channel).transpose()
     }
 

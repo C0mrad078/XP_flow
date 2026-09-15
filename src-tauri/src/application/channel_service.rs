@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use crate::domain::channel::Channel;
+use crate::domain::channel::{Channel, ChannelStatus};
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::ports::repositories::ChannelRepository;
 
@@ -37,6 +37,28 @@ impl ChannelService {
         }
         let channel = Channel::new(workspace_id, trimmed);
         self.channel_repo.create(&channel).await?;
+        Ok(channel)
+    }
+
+    pub async fn get(&self, id: Uuid) -> DomainResult<Option<Channel>> {
+        self.channel_repo.get(id).await
+    }
+
+    /// Pauses or resumes a channel (section 23). A paused channel keeps
+    /// all of its data untouched — it is simply skipped by the scheduler
+    /// and excluded from "next available slot" search until resumed.
+    pub async fn set_status(&self, id: Uuid, status: ChannelStatus) -> DomainResult<Channel> {
+        let mut channel =
+            self.channel_repo
+                .get(id)
+                .await?
+                .ok_or_else(|| DomainError::NotFound {
+                    entity: "Channel",
+                    id: id.to_string(),
+                })?;
+        channel.status = status;
+        channel.updated_at = chrono::Utc::now();
+        self.channel_repo.update(&channel).await?;
         Ok(channel)
     }
 }

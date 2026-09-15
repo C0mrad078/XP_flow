@@ -156,6 +156,58 @@ impl PublicationRepository for SqlitePublicationRepository {
         Ok(())
     }
 
+    async fn bulk_update(&self, publications: &[Publication]) -> DomainResult<()> {
+        if publications.is_empty() {
+            return Ok(());
+        }
+
+        let mut tx = self.pool.begin().await.map_err(map_repo_err)?;
+
+        for publication in publications {
+            let result = sqlx::query(
+                "UPDATE publications SET platform_account_id = ?, status = ?, title = ?, description = ?, hashtags_json = ?, \
+                 priority = ?, locked = ?, scheduled_at = ?, published_at = ?, remote_id = ?, retry_count = ?, last_error = ?, updated_at = ? \
+                 WHERE id = ?",
+            )
+            .bind(publication.platform_account_id.map(|id| id.to_string()))
+            .bind(publication.status.as_str())
+            .bind(&publication.title)
+            .bind(&publication.description)
+            .bind(serde_json::to_string(&publication.hashtags).unwrap_or_else(|_| "[]".to_string()))
+            .bind(publication.priority.as_str())
+            .bind(publication.locked)
+            .bind(publication.scheduled_at.map(|dt| dt.to_rfc3339()))
+            .bind(publication.published_at.map(|dt| dt.to_rfc3339()))
+            .bind(&publication.remote_id)
+            .bind(publication.retry_count)
+            .bind(&publication.last_error)
+            .bind(publication.updated_at.to_rfc3339())
+            .bind(publication.id.to_string())
+            .execute(&mut *tx)
+            .await;
+
+            match result {
+                Ok(_) => {}
+                Err(sqlx::Error::Database(ref db_err)) if db_err.is_unique_violation() => {
+                    let _ = tx.rollback().await;
+                    return Err(DomainError::BulkScheduleFailed(format!(
+                        "publication {} conflicts with an existing schedule slot",
+                        publication.id
+                    )));
+                }
+                Err(other) => {
+                    let _ = tx.rollback().await;
+                    return Err(DomainError::BulkScheduleFailed(other.to_string()));
+                }
+            }
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| DomainError::BulkScheduleFailed(format!("failed to commit batch: {e}")))?;
+        Ok(())
+    }
+
     async fn get(&self, id: Uuid) -> DomainResult<Option<Publication>> {
         let row = sqlx::query(&format!(
             "SELECT {SELECT_COLUMNS} FROM publications WHERE id = ?"
@@ -285,7 +337,11 @@ impl PublicationRepository for SqlitePublicationRepository {
         rows.iter().map(row_to_publication).collect()
     }
 
-    async fn list_due(&self, workspace_id: Uuid, now: DateTime<Utc>) -> DomainResult<Vec<Publication>> {
+    async fn list_due(
+        &self,
+        workspace_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> DomainResult<Vec<Publication>> {
         let rows = sqlx::query(&format!(
             "SELECT {SELECT_COLUMNS} FROM publications \
              WHERE workspace_id = ? AND status = 'scheduled' AND scheduled_at <= ? \
@@ -322,13 +378,19 @@ fn apply_filters(builder: &mut QueryBuilder<Sqlite>, query: &PublicationListQuer
         .push_bind(query.workspace_id.to_string());
 
     if let Some(channel_id) = query.channel_id {
-        builder.push(" AND channel_id = ").push_bind(channel_id.to_string());
+        builder
+            .push(" AND channel_id = ")
+            .push_bind(channel_id.to_string());
     }
     if let Some(platform) = query.platform {
-        builder.push(" AND platform = ").push_bind(platform.as_str());
+        builder
+            .push(" AND platform = ")
+            .push_bind(platform.as_str());
     }
     if let Some(priority) = query.priority {
-        builder.push(" AND priority = ").push_bind(priority.as_str());
+        builder
+            .push(" AND priority = ")
+            .push_bind(priority.as_str());
     }
     if let Some(statuses) = &query.statuses {
         if !statuses.is_empty() {

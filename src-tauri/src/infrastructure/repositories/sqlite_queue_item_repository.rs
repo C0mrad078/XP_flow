@@ -113,12 +113,23 @@ impl QueueItemRepository for SqliteQueueItemRepository {
         &self,
         workspace_id: Uuid,
     ) -> DomainResult<Vec<QueueItem>> {
-        let rows = sqlx::query(&format!(
+        let rows = sqlx::query(
             "SELECT qi.id, qi.workspace_id, qi.publication_id, qi.position, qi.created_at, qi.updated_at \
              FROM queue_items qi \
              JOIN publications p ON p.id = qi.publication_id \
              WHERE qi.workspace_id = ? AND p.scheduled_at IS NULL \
-             ORDER BY qi.position ASC"
+             ORDER BY qi.position ASC",
+        )
+        .bind(workspace_id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_repo_err)?;
+        rows.iter().map(row_to_item).collect()
+    }
+
+    async fn list_all_for_workspace(&self, workspace_id: Uuid) -> DomainResult<Vec<QueueItem>> {
+        let rows = sqlx::query(&format!(
+            "SELECT {SELECT_COLUMNS} FROM queue_items WHERE workspace_id = ? ORDER BY position ASC"
         ))
         .bind(workspace_id.to_string())
         .fetch_all(&self.pool)

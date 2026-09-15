@@ -202,8 +202,7 @@ impl Publication {
     /// (section 78/81) — never persisted, never mutated to `Failed` just
     /// because Phase 3 has no real uploader yet.
     pub fn is_overdue(&self, now: DateTime<Utc>) -> bool {
-        self.status == PublicationStatus::Scheduled
-            && self.scheduled_at.is_some_and(|at| at < now)
+        self.status == PublicationStatus::Scheduled && self.scheduled_at.is_some_and(|at| at < now)
     }
 
     /// Attempts to move this publication to `next`, validating the
@@ -346,11 +345,15 @@ mod tests {
             publication.transition(next).unwrap();
         }
         publication.scheduled_at = Some(now - chrono::Duration::hours(1));
-        publication.transition(PublicationStatus::Scheduled).unwrap();
+        publication
+            .transition(PublicationStatus::Scheduled)
+            .unwrap();
 
         assert!(publication.is_overdue(now), "past due and still scheduled");
 
-        publication.transition(PublicationStatus::Uploading).unwrap();
+        publication
+            .transition(PublicationStatus::Uploading)
+            .unwrap();
         assert!(
             !publication.is_overdue(now),
             "no longer just Scheduled, so no longer counted as overdue"

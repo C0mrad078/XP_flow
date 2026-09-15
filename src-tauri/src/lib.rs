@@ -18,6 +18,10 @@ use application::activity_service::ActivityService;
 use application::channel_service::ChannelService;
 use application::content_service::ContentService;
 use application::media_ingestion_service::MediaIngestionService;
+use application::platform_account_service::PlatformAccountService;
+use application::publication_service::PublicationService;
+use application::schedule_slot_service::ScheduleSlotService;
+use application::scheduler_service::SchedulerService;
 use application::settings_service::SettingsService;
 use application::source_service::SourceService;
 use application::workspace_service::WorkspaceService;
@@ -26,14 +30,18 @@ use domain::ports::hashing::{ContentHashService, PerceptualHashService};
 use domain::ports::media_service::{MediaProbeService, MediaService, ThumbnailService};
 use domain::ports::repositories::{
     ActivityRepository, ChannelRepository, DuplicateMatchRepository, NotificationRepository,
-    SettingsRepository, VideoRepository, VideoSourceRepository, WorkspaceRepository,
+    PlatformAccountRepository, PublicationRepository, QueueItemRepository,
+    ScheduleExceptionRepository, ScheduleSlotRepository, SettingsRepository, VideoRepository,
+    VideoSourceRepository, WorkspaceRepository,
 };
 use infrastructure::hashing::{DHashPerceptualHashService, Sha256ContentHashService};
 use infrastructure::media::{FfmpegMediaService, FfmpegThumbnailService, FfprobeMediaProbeService};
 use infrastructure::repositories::{
     SqliteActivityRepository, SqliteChannelRepository, SqliteDuplicateMatchRepository,
-    SqliteJobRepository, SqliteNotificationRepository, SqliteSettingsRepository,
-    SqliteVideoRepository, SqliteVideoSourceRepository, SqliteWorkspaceRepository,
+    SqliteJobRepository, SqliteNotificationRepository, SqlitePlatformAccountRepository,
+    SqlitePublicationRepository, SqliteQueueItemRepository, SqliteScheduleExceptionRepository,
+    SqliteScheduleSlotRepository, SqliteSettingsRepository, SqliteVideoRepository,
+    SqliteVideoSourceRepository, SqliteWorkspaceRepository,
 };
 use infrastructure::watcher::FolderWatcherService;
 use jobs::JobRepository;
@@ -147,6 +155,16 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
     let job_repo: Arc<dyn JobRepository> = Arc::new(SqliteJobRepository::new(pool.clone()));
     let channel_repo: Arc<dyn ChannelRepository> =
         Arc::new(SqliteChannelRepository::new(pool.clone()));
+    let publication_repo: Arc<dyn PublicationRepository> =
+        Arc::new(SqlitePublicationRepository::new(pool.clone()));
+    let queue_item_repo: Arc<dyn QueueItemRepository> =
+        Arc::new(SqliteQueueItemRepository::new(pool.clone()));
+    let schedule_slot_repo: Arc<dyn ScheduleSlotRepository> =
+        Arc::new(SqliteScheduleSlotRepository::new(pool.clone()));
+    let schedule_exception_repo: Arc<dyn ScheduleExceptionRepository> =
+        Arc::new(SqliteScheduleExceptionRepository::new(pool.clone()));
+    let platform_account_repo: Arc<dyn PlatformAccountRepository> =
+        Arc::new(SqlitePlatformAccountRepository::new(pool.clone()));
 
     let media_service: Arc<dyn MediaService> = Arc::new(FfmpegMediaService::new());
     let probe_service: Arc<dyn MediaProbeService> = Arc::new(FfprobeMediaProbeService::new());
@@ -156,7 +174,7 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         Arc::new(DHashPerceptualHashService::new());
 
     let activity_service = Arc::new(ActivityService::new(activity_repo.clone()));
-    let workspace_service = Arc::new(WorkspaceService::new(workspace_repo, activity_repo));
+    let workspace_service = Arc::new(WorkspaceService::new(workspace_repo.clone(), activity_repo));
     let settings_service = Arc::new(SettingsService::new(settings_repo));
     let notification_service = Arc::new(NotificationService::new(notification_repo));
     let media_status_service = Arc::new(MediaStatusService::new(media_service));
@@ -165,7 +183,26 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         video_repo.clone(),
         activity_service.clone(),
     ));
-    let channel_service = Arc::new(ChannelService::new(channel_repo));
+    let channel_service = Arc::new(ChannelService::new(channel_repo.clone()));
+    let publication_service = Arc::new(PublicationService::new(
+        publication_repo.clone(),
+        queue_item_repo.clone(),
+        video_repo.clone(),
+        activity_service.clone(),
+    ));
+    let schedule_slot_service = Arc::new(ScheduleSlotService::new(
+        schedule_slot_repo.clone(),
+        schedule_exception_repo.clone(),
+    ));
+    let scheduler_service = Arc::new(SchedulerService::new(
+        publication_repo,
+        channel_repo,
+        workspace_repo,
+        schedule_slot_repo,
+        schedule_exception_repo,
+        activity_service.clone(),
+    ));
+    let platform_account_service = Arc::new(PlatformAccountService::new(platform_account_repo));
 
     let ingestion = Arc::new(MediaIngestionService::new(
         video_repo.clone(),
@@ -232,6 +269,21 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         job_runner
             .clone()
             .spawn_periodic_reconciliation(workspace.id, PERIODIC_RECONCILIATION_INTERVAL);
+
+        // Queue reconciliation (section 91/113): catches queue/schedule
+        // drift (e.g. an orphaned QueueItem left behind by a crash between
+        // two writes) on every startup, the same "never silently discard"
+        // philosophy as the media reconciliation above.
+        match publication_service.reconcile_queue(workspace.id).await {
+            Ok(summary) if summary.orphaned_queue_items_removed > 0 => {
+                tracing::warn!(
+                    removed = summary.orphaned_queue_items_removed,
+                    "startup queue reconciliation removed orphaned queue items"
+                );
+            }
+            Ok(_) => {}
+            Err(err) => tracing::error!(%err, "startup queue reconciliation failed"),
+        }
     }
 
     Ok(AppState {
@@ -243,6 +295,10 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         content_service,
         source_service,
         channel_service,
+        publication_service,
+        scheduler_service,
+        schedule_slot_service,
+        platform_account_service,
         job_runner,
         video_repo,
         paths,

@@ -23,7 +23,8 @@ fn map_repo_err(err: sqlx::Error) -> DomainError {
     DomainError::Repository(err.to_string())
 }
 
-const SELECT_COLUMNS: &str = "id, channel_id, platform, display_name, status, external_account_id, \
+const SELECT_COLUMNS: &str =
+    "id, channel_id, platform, display_name, status, external_account_id, \
      connected_at, default_target, created_at, updated_at";
 
 fn row_to_account(row: &sqlx::sqlite::SqliteRow) -> Result<PlatformAccount, DomainError> {
@@ -49,7 +50,10 @@ fn row_to_account(row: &sqlx::sqlite::SqliteRow) -> Result<PlatformAccount, Doma
             .map_err(DomainError::Validation)?,
         external_account_id: row.try_get("external_account_id").map_err(map_repo_err)?,
         connected_at: connected_at.map(|s| parse_dt(&s)),
-        default_target: row.try_get::<i64, _>("default_target").map_err(map_repo_err)? != 0,
+        default_target: row
+            .try_get::<i64, _>("default_target")
+            .map_err(map_repo_err)?
+            != 0,
         created_at: parse_dt(
             &row.try_get::<String, _>("created_at")
                 .map_err(map_repo_err)?,

@@ -27,10 +27,7 @@ pub enum DomainError {
     Repository(String),
 
     #[error("invalid value for {field}: {reason}")]
-    InvalidValue {
-        field: &'static str,
-        reason: String,
-    },
+    InvalidValue { field: &'static str, reason: String },
 
     /// A publication already exists for this (video, channel, platform)
     /// triple in a non-terminal state (section 50/51) — enforced first here

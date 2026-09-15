@@ -67,11 +67,13 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
     }
 
     async fn get(&self, id: Uuid) -> DomainResult<Option<Workspace>> {
-        let row = sqlx::query(&format!("SELECT {SELECT_COLUMNS} FROM workspaces WHERE id = ?"))
-            .bind(id.to_string())
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(map_repo_err)?;
+        let row = sqlx::query(&format!(
+            "SELECT {SELECT_COLUMNS} FROM workspaces WHERE id = ?"
+        ))
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_repo_err)?;
 
         row.map(|r| row_to_workspace(&r).map_err(map_repo_err))
             .transpose()

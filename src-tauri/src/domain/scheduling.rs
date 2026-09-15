@@ -25,11 +25,11 @@ pub const DEFAULT_SEARCH_HORIZON_DAYS: i64 = 120;
 /// platform-specific slots take priority; channel-default (`platform:
 /// None`) slots only apply when there is no platform-specific slot for
 /// that exact weekday.
-pub fn effective_slots_for_weekday<'a>(
-    slots: &'a [ScheduleSlot],
+pub fn effective_slots_for_weekday(
+    slots: &[ScheduleSlot],
     weekday: i32,
     platform: Platform,
-) -> Vec<&'a ScheduleSlot> {
+) -> Vec<&ScheduleSlot> {
     let platform_specific: Vec<&ScheduleSlot> = slots
         .iter()
         .filter(|s| s.is_active && s.day_of_week == weekday && s.platform == Some(platform))
@@ -95,7 +95,8 @@ pub fn find_next_available_slot(
         }
 
         let weekday = iso_weekday(date);
-        let mut candidates: Vec<&ScheduleSlot> = effective_slots_for_weekday(slots, weekday, platform);
+        let mut candidates: Vec<&ScheduleSlot> =
+            effective_slots_for_weekday(slots, weekday, platform);
         candidates.sort_by(|a, b| a.time_of_day.cmp(&b.time_of_day));
 
         for slot in candidates {
@@ -241,7 +242,12 @@ mod tests {
         )
         .unwrap();
         // Must skip 2024-03-10 (the gap) and land on the following Sunday.
-        assert_eq!(found.with_timezone(&chrono_tz::America::New_York).date_naive(), NaiveDate::from_ymd_opt(2024, 3, 17).unwrap());
+        assert_eq!(
+            found
+                .with_timezone(&chrono_tz::America::New_York)
+                .date_naive(),
+            NaiveDate::from_ymd_opt(2024, 3, 17).unwrap()
+        );
     }
 
     #[test]
@@ -276,7 +282,15 @@ mod tests {
         // horizon we give it starting from a day already past it.
         let slots = vec![slot(None, 1, "10:00")];
         let earliest = Utc.with_ymd_and_hms(2024, 1, 3, 0, 0, 0).unwrap(); // Wednesday
-        let found = find_next_available_slot(&slots, &[], "UTC", Platform::YouTube, earliest, &HashSet::new(), 3);
+        let found = find_next_available_slot(
+            &slots,
+            &[],
+            "UTC",
+            Platform::YouTube,
+            earliest,
+            &HashSet::new(),
+            3,
+        );
         assert!(found.is_none());
     }
 }
