@@ -455,3 +455,130 @@ fn apply_filters(builder: &mut QueryBuilder<Sqlite>, query: &VideoListQuery) {
         builder.push(" AND id IN (SELECT video_id FROM duplicate_matches)");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::test_support::*;
+
+    use super::*;
+
+    async fn seeded_repo() -> (SqliteVideoRepository, Uuid, Uuid) {
+        let pool = temp_pool("video-repo-query").await;
+        let (workspace_id, source_id) = seed_workspace_and_source(&pool).await;
+        (SqliteVideoRepository::new(pool), workspace_id, source_id)
+    }
+
+    async fn insert_video(
+        repo: &SqliteVideoRepository,
+        workspace_id: Uuid,
+        source_id: Uuid,
+        title: &str,
+        ext: &str,
+    ) -> Video {
+        let mut video = Video::new(
+            workspace_id,
+            source_id,
+            None,
+            format!("{title}.{ext}"),
+            title,
+            format!("/videos/{title}.{ext}"),
+            1024,
+            ext,
+        );
+        video.validation_status = ValidationStatus::Valid;
+        repo.create(&video).await.unwrap();
+        video
+    }
+
+    #[tokio::test]
+    async fn pagination_slices_results_and_reports_the_correct_total() {
+        let (repo, workspace_id, source_id) = seeded_repo().await;
+        for i in 0..5 {
+            insert_video(&repo, workspace_id, source_id, &format!("clip-{i}"), "mp4").await;
+        }
+
+        let mut query = VideoListQuery::new(workspace_id);
+        query.page_size = 2;
+        query.page = 0;
+        let page_one = repo.list_paginated(&query).await.unwrap();
+        assert_eq!(page_one.items.len(), 2);
+        assert_eq!(page_one.total, 5);
+
+        query.page = 2;
+        let page_three = repo.list_paginated(&query).await.unwrap();
+        assert_eq!(
+            page_three.items.len(),
+            1,
+            "5 items at page size 2 -> last page has 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_matches_display_title_case_insensitively() {
+        let (repo, workspace_id, source_id) = seeded_repo().await;
+        insert_video(&repo, workspace_id, source_id, "Neymar Highlights", "mp4").await;
+        insert_video(&repo, workspace_id, source_id, "Cooking Tutorial", "mp4").await;
+
+        let mut query = VideoListQuery::new(workspace_id);
+        query.search = Some("neymar".to_string());
+        let page = repo.list_paginated(&query).await.unwrap();
+
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].display_title, "Neymar Highlights");
+    }
+
+    #[tokio::test]
+    async fn validation_status_filter_narrows_results() {
+        let (repo, workspace_id, source_id) = seeded_repo().await;
+        let mut valid = insert_video(&repo, workspace_id, source_id, "valid-clip", "mp4").await;
+        valid.validation_status = ValidationStatus::Valid;
+        repo.update(&valid).await.unwrap();
+
+        let mut invalid = insert_video(&repo, workspace_id, source_id, "broken-clip", "mp4").await;
+        invalid.validation_status = ValidationStatus::Invalid;
+        repo.update(&invalid).await.unwrap();
+
+        let mut query = VideoListQuery::new(workspace_id);
+        query.validation_status = Some(ValidationStatus::Invalid);
+        let page = repo.list_paginated(&query).await.unwrap();
+
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].display_title, "broken-clip");
+    }
+
+    #[tokio::test]
+    async fn archived_videos_are_excluded_unless_explicitly_included() {
+        let (repo, workspace_id, source_id) = seeded_repo().await;
+        let mut archived = insert_video(&repo, workspace_id, source_id, "old-clip", "mp4").await;
+        archived.archived = true;
+        repo.update(&archived).await.unwrap();
+        insert_video(&repo, workspace_id, source_id, "active-clip", "mp4").await;
+
+        let default_query = VideoListQuery::new(workspace_id);
+        let default_page = repo.list_paginated(&default_query).await.unwrap();
+        assert_eq!(default_page.total, 1);
+
+        let mut with_archived = VideoListQuery::new(workspace_id);
+        with_archived.include_archived = true;
+        let all_page = repo.list_paginated(&with_archived).await.unwrap();
+        assert_eq!(all_page.total, 2);
+    }
+
+    #[tokio::test]
+    async fn summary_counts_match_what_was_inserted() {
+        let (repo, workspace_id, source_id) = seeded_repo().await;
+        insert_video(&repo, workspace_id, source_id, "clip-1", "mp4").await;
+        let mut invalid = insert_video(&repo, workspace_id, source_id, "clip-2", "mp4").await;
+        invalid.validation_status = ValidationStatus::Invalid;
+        repo.update(&invalid).await.unwrap();
+
+        let summary = repo.summary(workspace_id).await.unwrap();
+        assert_eq!(summary.total, 2);
+        assert_eq!(summary.ready, 1);
+        assert_eq!(summary.invalid, 1);
+        assert_eq!(
+            summary.unassigned, 2,
+            "neither video was assigned a channel"
+        );
+    }
+}

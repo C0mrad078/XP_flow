@@ -8,6 +8,8 @@ pub mod persistence;
 pub mod platform;
 pub mod services;
 pub mod state;
+#[cfg(test)]
+pub mod test_support;
 
 use std::sync::Arc;
 use std::time::Duration;

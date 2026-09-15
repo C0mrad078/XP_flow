@@ -530,3 +530,179 @@ impl JobRunner {
         Ok(summary)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use crate::application::activity_service::ActivityService;
+    use crate::application::media_ingestion_service::MediaIngestionService;
+    use crate::domain::ports::hashing::{ContentHashService, PerceptualHashService};
+    use crate::domain::ports::media_service::{MediaProbeService, ThumbnailService};
+    use crate::domain::ports::repositories::{
+        ActivityRepository, DuplicateMatchRepository, NotificationRepository, VideoRepository,
+        VideoSourceRepository,
+    };
+    use crate::domain::video_source::VideoSourceType;
+    use crate::infrastructure::repositories::{
+        SqliteActivityRepository, SqliteDuplicateMatchRepository, SqliteJobRepository,
+        SqliteNotificationRepository, SqliteVideoRepository, SqliteVideoSourceRepository,
+    };
+    use crate::jobs::JobRepository;
+    use crate::platform::paths::AppPaths;
+    use crate::services::notification_service::NotificationService;
+    use crate::test_support::*;
+
+    use super::*;
+
+    async fn build_runner(pool: sqlx::SqlitePool, app_dir: std::path::PathBuf) -> JobRunner {
+        let video_repo: Arc<dyn VideoRepository> =
+            Arc::new(SqliteVideoRepository::new(pool.clone()));
+        let source_repo: Arc<dyn VideoSourceRepository> =
+            Arc::new(SqliteVideoSourceRepository::new(pool.clone()));
+        let duplicate_repo: Arc<dyn DuplicateMatchRepository> =
+            Arc::new(SqliteDuplicateMatchRepository::new(pool.clone()));
+        let activity_repo: Arc<dyn ActivityRepository> =
+            Arc::new(SqliteActivityRepository::new(pool.clone()));
+        let notification_repo: Arc<dyn NotificationRepository> =
+            Arc::new(SqliteNotificationRepository::new(pool.clone()));
+        let job_repo: Arc<dyn JobRepository> = Arc::new(SqliteJobRepository::new(pool));
+
+        let probe: Arc<dyn MediaProbeService> = Arc::new(FakeProbeService::new());
+        let thumbnail: Arc<dyn ThumbnailService> = Arc::new(FakeThumbnailService);
+        let hash: Arc<dyn ContentHashService> = Arc::new(FakeHashService::new());
+        let perceptual: Arc<dyn PerceptualHashService> = Arc::new(FakePerceptualHashService);
+
+        let app_paths = AppPaths {
+            data_dir: app_dir.clone(),
+            log_dir: app_dir.clone(),
+            cache_dir: app_dir.clone(),
+            thumbnail_cache_dir: app_dir.join("thumbnails"),
+            temp_cache_dir: app_dir.join("temp"),
+        };
+        std::fs::create_dir_all(&app_paths.thumbnail_cache_dir).unwrap();
+
+        let ingestion = Arc::new(MediaIngestionService::new(
+            video_repo.clone(),
+            duplicate_repo,
+            probe,
+            thumbnail,
+            hash,
+            perceptual,
+            app_paths,
+        ));
+        let activity_service = Arc::new(ActivityService::new(activity_repo));
+        let notification_service = Arc::new(NotificationService::new(notification_repo));
+        let (watcher, _rx) = crate::infrastructure::watcher::FolderWatcherService::start();
+
+        JobRunner::new(
+            job_repo,
+            video_repo,
+            source_repo,
+            ingestion,
+            activity_service,
+            notification_service,
+            Arc::new(watcher),
+        )
+    }
+
+    async fn seed_folder_source(
+        pool: &sqlx::SqlitePool,
+        workspace_id: uuid::Uuid,
+        folder: &Path,
+        recursive: bool,
+    ) -> uuid::Uuid {
+        let source = crate::domain::video_source::VideoSource::new_folder(
+            workspace_id,
+            "Test Folder",
+            VideoSourceType::WatchFolder,
+            folder.display().to_string(),
+            None,
+            recursive,
+            false,
+        );
+        let repo = SqliteVideoSourceRepository::new(pool.clone());
+        repo.create(&source).await.unwrap();
+        source.id
+    }
+
+    #[tokio::test]
+    async fn reconcile_source_ingests_every_supported_file_in_the_folder() {
+        let dir = temp_dir("reconcile-basic");
+        let pool = temp_pool("reconcile-basic-db").await;
+        let (workspace_id, _manual_source) = seed_workspace_and_source(&pool).await;
+
+        let watched = dir.join("watched");
+        std::fs::create_dir_all(&watched).unwrap();
+        write_fake_video(&watched, "a.mp4", b"content a");
+        write_fake_video(&watched, "b.mov", b"content b");
+        std::fs::write(watched.join("readme.txt"), b"not a video").unwrap();
+
+        let source_id = seed_folder_source(&pool, workspace_id, &watched, false).await;
+        let runner = build_runner(pool, dir.join("app")).await;
+
+        let summary = runner.reconcile_source(source_id).await.unwrap();
+
+        assert_eq!(summary.scanned, 2, "the .txt file must be skipped");
+        assert_eq!(summary.imported, 2);
+        assert_eq!(summary.marked_missing, 0);
+    }
+
+    #[tokio::test]
+    async fn reconcile_source_marks_vanished_files_as_missing_without_deleting_the_row() {
+        let dir = temp_dir("reconcile-missing");
+        let pool = temp_pool("reconcile-missing-db").await;
+        let (workspace_id, _manual_source) = seed_workspace_and_source(&pool).await;
+
+        let watched = dir.join("watched");
+        std::fs::create_dir_all(&watched).unwrap();
+        let doomed_path = write_fake_video(&watched, "doomed.mp4", b"will be deleted");
+
+        let source_id = seed_folder_source(&pool, workspace_id, &watched, false).await;
+        let runner = build_runner(pool.clone(), dir.join("app")).await;
+
+        let first = runner.reconcile_source(source_id).await.unwrap();
+        assert_eq!(first.imported, 1);
+
+        std::fs::remove_file(&doomed_path).unwrap();
+        let second = runner.reconcile_source(source_id).await.unwrap();
+        assert_eq!(second.marked_missing, 1);
+
+        let video_repo = SqliteVideoRepository::new(pool);
+        let videos = video_repo.list_for_workspace(workspace_id).await.unwrap();
+        assert_eq!(videos.len(), 1, "the record must survive, not be deleted");
+        assert_eq!(
+            videos[0].availability_status,
+            crate::domain::video_status::AvailabilityStatus::Missing
+        );
+    }
+
+    #[tokio::test]
+    async fn reconciling_twice_does_not_duplicate_already_indexed_files() {
+        let dir = temp_dir("reconcile-idempotent");
+        let pool = temp_pool("reconcile-idempotent-db").await;
+        let (workspace_id, _manual_source) = seed_workspace_and_source(&pool).await;
+
+        let watched = dir.join("watched");
+        std::fs::create_dir_all(&watched).unwrap();
+        write_fake_video(&watched, "stable.mp4", b"unchanging content");
+
+        let source_id = seed_folder_source(&pool, workspace_id, &watched, false).await;
+        let runner = build_runner(pool.clone(), dir.join("app")).await;
+
+        runner.reconcile_source(source_id).await.unwrap();
+        let second = runner.reconcile_source(source_id).await.unwrap();
+
+        assert_eq!(second.imported, 0);
+        assert_eq!(second.already_indexed, 1);
+
+        let video_repo = SqliteVideoRepository::new(pool);
+        let videos = video_repo.list_for_workspace(workspace_id).await.unwrap();
+        assert_eq!(
+            videos.len(),
+            1,
+            "re-scanning must never create a duplicate row for the same path"
+        );
+    }
+}

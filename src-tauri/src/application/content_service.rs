@@ -275,4 +275,130 @@ mod tests {
             serde_json::from_str(r#"{"notes": "shot on location"}"#).unwrap();
         assert_eq!(set.notes, Some(Some("shot on location".to_string())));
     }
+
+    // ---------------------------------------------------------------
+    // Integration tests: archive and remove behavior (section 90).
+    // ---------------------------------------------------------------
+
+    use crate::infrastructure::repositories::{
+        SqliteDuplicateMatchRepository, SqliteVideoRepository,
+    };
+    use crate::test_support::*;
+
+    async fn build_service_with_video(
+        dir: &std::path::Path,
+    ) -> (ContentService, sqlx::SqlitePool, Uuid) {
+        let pool = temp_pool("content-service").await;
+        let (workspace_id, source_id) = seed_workspace_and_source(&pool).await;
+
+        let video_repo: Arc<dyn VideoRepository> =
+            Arc::new(SqliteVideoRepository::new(pool.clone()));
+        let duplicate_repo: Arc<dyn DuplicateMatchRepository> =
+            Arc::new(SqliteDuplicateMatchRepository::new(pool.clone()));
+        let app_paths = crate::platform::paths::AppPaths {
+            data_dir: dir.to_path_buf(),
+            log_dir: dir.to_path_buf(),
+            cache_dir: dir.to_path_buf(),
+            thumbnail_cache_dir: dir.join("thumbnails"),
+            temp_cache_dir: dir.join("temp"),
+        };
+        std::fs::create_dir_all(&app_paths.thumbnail_cache_dir).unwrap();
+
+        let ingestion = Arc::new(MediaIngestionService::new(
+            video_repo.clone(),
+            duplicate_repo.clone(),
+            Arc::new(FakeProbeService::new()),
+            Arc::new(FakeThumbnailService),
+            Arc::new(FakeHashService::new()),
+            Arc::new(FakePerceptualHashService),
+            app_paths,
+        ));
+
+        let activity_repo: Arc<dyn crate::domain::ports::repositories::ActivityRepository> =
+            Arc::new(
+                crate::infrastructure::repositories::SqliteActivityRepository::new(pool.clone()),
+            );
+        let activity_service = Arc::new(
+            crate::application::activity_service::ActivityService::new(activity_repo),
+        );
+
+        let content_service = ContentService::new(
+            video_repo.clone(),
+            duplicate_repo,
+            ingestion.clone(),
+            activity_service,
+        );
+
+        let video_path = write_fake_video(dir, "clip.mp4", b"content");
+        let outcome = ingestion
+            .ingest_path(workspace_id, source_id, None, &video_path)
+            .await;
+        let video_id = match outcome {
+            crate::application::media_ingestion_service::IngestOutcome::Created(v) => v.id,
+            _ => panic!("expected the fixture video to be created"),
+        };
+
+        (content_service, pool, video_id)
+    }
+
+    #[tokio::test]
+    async fn archiving_a_video_hides_it_from_the_default_summary_but_keeps_the_row() {
+        let dir = temp_dir("content-archive");
+        let (service, pool, video_id) = build_service_with_video(&dir).await;
+
+        let before = service
+            .summary(video_workspace(&pool, video_id).await)
+            .await
+            .unwrap();
+        assert_eq!(before.total, 1);
+        assert_eq!(before.archived, 0);
+
+        service.set_archived(video_id, true).await.unwrap();
+
+        let after = service
+            .summary(video_workspace(&pool, video_id).await)
+            .await
+            .unwrap();
+        assert_eq!(
+            after.total, 0,
+            "archived videos must not count toward the active total"
+        );
+        assert_eq!(after.archived, 1);
+
+        assert!(
+            service.get_detail(video_id).await.unwrap().is_some(),
+            "the row itself must still exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_a_video_deletes_the_row_but_never_the_original_file() {
+        let dir = temp_dir("content-remove");
+        let (service, _pool, video_id) = build_service_with_video(&dir).await;
+
+        let detail = service.get_detail(video_id).await.unwrap().unwrap();
+        let original_path = std::path::PathBuf::from(&detail.video.file_path);
+        assert!(original_path.is_file());
+
+        service.remove(video_id).await.unwrap();
+
+        assert!(
+            service.get_detail(video_id).await.unwrap().is_none(),
+            "the database row must be gone"
+        );
+        assert!(
+            original_path.is_file(),
+            "the original video file on disk must never be deleted"
+        );
+    }
+
+    async fn video_workspace(pool: &sqlx::SqlitePool, video_id: Uuid) -> Uuid {
+        let video_repo = SqliteVideoRepository::new(pool.clone());
+        video_repo
+            .get(video_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .workspace_id
+    }
 }

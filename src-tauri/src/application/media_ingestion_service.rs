@@ -389,4 +389,155 @@ mod tests {
         };
         assert_eq!(classify_validation(&probe), ValidationStatus::Invalid);
     }
+
+    // ---------------------------------------------------------------
+    // Integration tests: real SQLite repositories, fake FFmpeg/hashing
+    // services (section 90/91/92 — no dependency on ffmpeg being
+    // installed wherever `cargo test` runs).
+    // ---------------------------------------------------------------
+
+    use crate::infrastructure::repositories::{
+        SqliteDuplicateMatchRepository, SqliteVideoRepository,
+    };
+    use crate::test_support::*;
+
+    fn build_service(
+        pool: sqlx::SqlitePool,
+        paths_dir: std::path::PathBuf,
+    ) -> MediaIngestionService {
+        let video_repo: Arc<dyn VideoRepository> =
+            Arc::new(SqliteVideoRepository::new(pool.clone()));
+        let duplicate_repo: Arc<dyn DuplicateMatchRepository> =
+            Arc::new(SqliteDuplicateMatchRepository::new(pool));
+        let probe: Arc<dyn MediaProbeService> = Arc::new(FakeProbeService::new());
+        let thumbnail: Arc<dyn ThumbnailService> = Arc::new(FakeThumbnailService);
+        let hash: Arc<dyn ContentHashService> = Arc::new(FakeHashService::new());
+        let perceptual: Arc<dyn PerceptualHashService> = Arc::new(FakePerceptualHashService);
+
+        let app_paths = crate::platform::paths::AppPaths {
+            data_dir: paths_dir.clone(),
+            log_dir: paths_dir.clone(),
+            cache_dir: paths_dir.clone(),
+            thumbnail_cache_dir: paths_dir.join("thumbnails"),
+            temp_cache_dir: paths_dir.join("temp"),
+        };
+        std::fs::create_dir_all(&app_paths.thumbnail_cache_dir).unwrap();
+
+        MediaIngestionService::new(
+            video_repo,
+            duplicate_repo,
+            probe,
+            thumbnail,
+            hash,
+            perceptual,
+            app_paths,
+        )
+    }
+
+    #[tokio::test]
+    async fn ingesting_a_valid_file_creates_a_video_with_the_requested_channel() {
+        let dir = temp_dir("ingest-valid");
+        let pool = temp_pool("ingest-valid-db").await;
+        let (workspace_id, source_id) = seed_workspace_and_source(&pool).await;
+        let channel_id = seed_channel(&pool, workspace_id, "Football").await;
+        let service = build_service(pool, dir.join("app"));
+
+        let path = write_fake_video(&dir, "clip_001.mp4", b"fake bytes");
+        let outcome = service
+            .ingest_path(workspace_id, source_id, Some(channel_id), &path)
+            .await;
+
+        match outcome {
+            IngestOutcome::Created(video) => {
+                assert_eq!(video.validation_status, ValidationStatus::Valid);
+                assert_eq!(video.channel_id, Some(channel_id));
+                assert_eq!(video.display_title, "Clip 001");
+                assert!(video.thumbnail_path.is_some());
+            }
+            other => panic!(
+                "expected Created, got a different outcome: {}",
+                matches_label(&other)
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn ingesting_an_unsupported_extension_is_rejected() {
+        let dir = temp_dir("ingest-unsupported");
+        let pool = temp_pool("ingest-unsupported-db").await;
+        let (workspace_id, source_id) = seed_workspace_and_source(&pool).await;
+        let service = build_service(pool, dir.join("app"));
+
+        let path = write_fake_video(&dir, "notes.txt", b"not a video");
+        let outcome = service
+            .ingest_path(workspace_id, source_id, None, &path)
+            .await;
+
+        assert!(matches!(
+            outcome,
+            IngestOutcome::Rejected(MediaError::UnsupportedFormat { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_identical_file_is_reported_as_a_duplicate_not_a_new_row() {
+        let dir = temp_dir("ingest-dup");
+        let pool = temp_pool("ingest-dup-db").await;
+        let (workspace_id, source_id) = seed_workspace_and_source(&pool).await;
+
+        let path_a = write_fake_video(&dir, "clip_a.mp4", b"same content");
+        let path_b = write_fake_video(&dir, "clip_b.mp4", b"same content");
+
+        // Force both paths to hash identically, as real content-identical
+        // files would.
+        let hash_service = Arc::new(FakeHashService::new());
+        hash_service.hash_for(&path_a, "identical-hash");
+        hash_service.hash_for(&path_b, "identical-hash");
+
+        let video_repo: Arc<dyn VideoRepository> =
+            Arc::new(SqliteVideoRepository::new(pool.clone()));
+        let duplicate_repo: Arc<dyn DuplicateMatchRepository> =
+            Arc::new(SqliteDuplicateMatchRepository::new(pool));
+        let app_dir = dir.join("app");
+        let app_paths = crate::platform::paths::AppPaths {
+            data_dir: app_dir.clone(),
+            log_dir: app_dir.clone(),
+            cache_dir: app_dir.clone(),
+            thumbnail_cache_dir: app_dir.join("thumbnails"),
+            temp_cache_dir: app_dir.join("temp"),
+        };
+        std::fs::create_dir_all(&app_paths.thumbnail_cache_dir).unwrap();
+        let service = MediaIngestionService::new(
+            video_repo,
+            duplicate_repo,
+            Arc::new(FakeProbeService::new()),
+            Arc::new(FakeThumbnailService),
+            hash_service,
+            Arc::new(FakePerceptualHashService),
+            app_paths,
+        );
+
+        let first = service
+            .ingest_path(workspace_id, source_id, None, &path_a)
+            .await;
+        assert!(matches!(first, IngestOutcome::Created(_)));
+
+        let second = service
+            .ingest_path(workspace_id, source_id, None, &path_b)
+            .await;
+        assert!(
+            matches!(second, IngestOutcome::Duplicate { .. }),
+            "identical content must not create a second row"
+        );
+    }
+
+    fn matches_label(outcome: &IngestOutcome) -> &'static str {
+        match outcome {
+            IngestOutcome::Created(_) => "Created",
+            IngestOutcome::Duplicate { .. } => "Duplicate",
+            IngestOutcome::Moved { .. } => "Moved",
+            IngestOutcome::AlreadyIndexed { .. } => "AlreadyIndexed",
+            IngestOutcome::Rejected(_) => "Rejected",
+        }
+    }
 }
