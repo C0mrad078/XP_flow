@@ -820,6 +820,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auto_schedule_refuses_a_locked_publication() {
+        let pool = temp_pool("sched-svc-auto-locked").await;
+        let (workspace_id, source_id) = seed_workspace_and_source(&pool).await;
+        let channel_id = seed_channel(&pool, workspace_id, "Main").await;
+        let video_id = seed_video(&pool, workspace_id, source_id, None, "Clip").await;
+        let harness = build_harness(pool.clone()).await;
+
+        let publication = harness
+            .publications
+            .add_to_queue(
+                workspace_id,
+                video_id,
+                channel_id,
+                Platform::YouTube,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let publication_repo = SqlitePublicationRepository::new(pool);
+        let mut locked = publication_repo.get(publication.id).await.unwrap().unwrap();
+        locked.locked = true;
+        publication_repo.update(&locked).await.unwrap();
+
+        let result = harness.scheduler.auto_schedule(publication.id).await;
+        assert!(matches!(result, Err(DomainError::PublicationLocked { .. })));
+    }
+
+    #[tokio::test]
     async fn auto_schedule_channel_is_transactional_and_priority_ordered() {
         let pool = temp_pool("sched-svc-bulk").await;
         let (workspace_id, source_id) = seed_workspace_and_source(&pool).await;

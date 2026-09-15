@@ -1,6 +1,7 @@
 use std::path::Path;
+use std::time::Duration;
 
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use thiserror::Error;
 
@@ -29,7 +30,17 @@ pub async fn init_pool(path: &Path) -> Result<SqlitePool, DatabaseError> {
     let options = SqliteConnectOptions::new()
         .filename(path)
         .create_if_missing(true)
-        .foreign_keys(true);
+        .foreign_keys(true)
+        // Section 113 quality review ("SQLite contention"): the default
+        // rollback-journal mode blocks every reader while a writer holds
+        // its transaction (and vice versa), which Phase 3's bulk
+        // scheduling transactions make far more likely to actually bite.
+        // WAL lets readers and a writer proceed concurrently; a
+        // non-zero busy_timeout makes a genuine writer-vs-writer
+        // collision retry for a few seconds instead of failing the
+        // command immediately with SQLITE_BUSY.
+        .journal_mode(SqliteJournalMode::Wal)
+        .busy_timeout(Duration::from_secs(5));
 
     let pool = SqlitePoolOptions::new()
         .max_connections(8)

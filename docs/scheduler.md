@@ -19,7 +19,7 @@ relationship should avoid redundant fields and be documented. The
 relationship settled on:
 
 - **`Publication`** (`domain::publication`) is the source of truth for
-  *what* is being published, *where*, and *its current lifecycle state*.
+  _what_ is being published, _where_, and _its current lifecycle state_.
   Phase 3 adds `workspace_id` (so queries can be workspace-scoped without a
   join), `priority` (seeded from the source video's priority at creation
   time but independently mutable afterward — bumping a publication's
@@ -27,7 +27,7 @@ relationship settled on:
   versa), and `locked` (protects a publication's `scheduled_at` from the
   auto-scheduler and "Rebuild Schedule").
 - **`QueueItem`** (`domain::queue_item`) only owns what is genuinely
-  specific to *manual queue membership*: its existence and its manual
+  specific to _manual queue membership_: its existence and its manual
   `position`. It does **not** duplicate `Publication::priority` — the
   Phase 1 shape had a redundant `priority` column that was never a second
   source of truth, just a footgun waiting to drift from the real one, so
@@ -35,7 +35,7 @@ relationship settled on:
   under active manual-queue management: created on `Ready -> Queued`, kept
   through `Scheduled` (a scheduled item is still "in the queue"), and
   removed on `Cancelled`/`Archived`. `position` is only meaningful for
-  *unscheduled* items — once a publication has a `scheduled_at`, its order
+  _unscheduled_ items — once a publication has a `scheduled_at`, its order
   is derived from that timestamp instead.
 - **`ScheduleSlot`** (`domain::schedule_slot`) models a channel's recurring
   weekly publishing pattern. `platform` is `Option<Platform>` rather than
@@ -63,7 +63,7 @@ relationship settled on:
 
 Every `DateTime<Utc>` is what gets persisted and compared; every
 wall-clock schedule slot and every calendar display resolves through the
-*workspace's* configured IANA timezone, never the host OS's. This is not
+_workspace's_ configured IANA timezone, never the host OS's. This is not
 optional decoration — the brief is explicit that relying on the machine's
 local timezone is a bug, since the operator's machine and the content
 schedule's intended timezone are not guaranteed to match.
@@ -78,7 +78,7 @@ DST-safe by construction:
   rather than silently shifted to some other time.
 - A local time that falls in a **"fall back" ambiguous window** (a
   wall-clock time that occurs twice) deterministically resolves to the
-  *earlier* of the two instants, rather than being random or panicking.
+  _earlier_ of the two instants, rather than being random or panicking.
 
 Both cases are unit tested against `America/New_York`'s real 2024 DST
 transitions (`domain::scheduling::tests::is_dst_safe_across_the_*`).
@@ -87,14 +87,14 @@ and `SchedulerService::calendar_range` share the same underlying
 `resolve_local_datetime_to_utc` helper — there is exactly one place in the
 codebase that converts a local wall-clock instant to UTC.
 
-The frontend never does its own timezone math for *when* something is
+The frontend never does its own timezone math for _when_ something is
 scheduled: `get_calendar_range` returns each publication's UTC
 `scheduled_at` pre-resolved into `local_date`/`local_time` strings, and
 `formatTimeInZone`/`formatDateInZone`/`localDateKeyInZone`
 (`src/lib/formatting/date.ts`) format any other raw `scheduled_at` using
-the workspace's `timezone`, explicitly *not* the browser's default. The
+the workspace's `timezone`, explicitly _not_ the browser's default. The
 Calendar's own day-grid layout (`src/features/calendar/calendar-dates.ts`)
-is deliberately timezone-*unaware* — grid layout (which dates go in which
+is deliberately timezone-_unaware_ — grid layout (which dates go in which
 cell) never depends on a zone, only on which calendar date a publication's
 already-resolved `local_date` falls on.
 
@@ -119,12 +119,12 @@ and horizon exhaustion) without a database or the real system clock.
   first as a stable tiebreak), inside **one database transaction**
   (`PublicationRepository::bulk_update`) — all-or-nothing. An item for
   which no slot could be found within the horizon is left `Queued` and
-  reported as *skipped*, not treated as a batch failure.
+  reported as _skipped_, not treated as a batch failure.
 - **`fill_schedule_gaps`** — the same algorithm as `auto_schedule_channel`
   bounded to a shorter 30-day horizon (vs. the default 120), since its
-  purpose (section 26) is closing visible *near-term* gaps.
+  purpose (section 26) is closing visible _near-term_ gaps.
 - **`rebuild_channel_schedule`** — recomputes `scheduled_at` for every
-  *unlocked, already-Scheduled* publication on a channel (e.g. after its
+  _unlocked, already-Scheduled_ publication on a channel (e.g. after its
   weekly slots changed). Locked scheduled publications are treated as
   immovable obstacles everyone else must route around; a publication that
   no longer fits anywhere is unscheduled back to `Queued` rather than left
@@ -141,18 +141,18 @@ check:
 - `idx_publications_active_dedupe` — at most one non-terminal publication
   per `(video_id, channel_id, platform)`. `cancelled`/`archived`/
   `duplicate` are excluded so a video can be re-queued to the same target
-  after cancellation; `published` is *included* (still blocks) so the same
+  after cancellation; `published` is _included_ (still blocks) so the same
   video can't be silently re-added while still sitting in `published`
   awaiting archival.
 - `idx_publications_channel_scheduled_dedupe` — no two `Scheduled`
   publications may share the exact same `(channel_id, scheduled_at)`.
   This is what actually prevents a double-booked slot under a real
   concurrent race — `application::scheduler_service::tests::
-  concurrent_scheduling_to_the_same_instant_never_double_books` proves
+concurrent_scheduling_to_the_same_instant_never_double_books` proves
   this directly: it fires two real concurrent `schedule_at` calls (via
   `tokio::join!`, not sequential calls) at the same channel and instant,
   and asserts exactly one wins while the database never ends up with two
-  matching rows — i.e. the *database* is what prevents the double-booking,
+  matching rows — i.e. the _database_ is what prevents the double-booking,
   not just the sequential application-level check (which has an inherent
   TOCTOU window under real concurrency).
 - `idx_schedule_slots_dedupe` — no two active slots at the same
@@ -193,11 +193,11 @@ phase acts on it.
   Phase 3 — the video itself was already validated on import; these calls
   are simply reaching the machine's "ready to queue" point, not skipping
   real work), and creates its `QueueItem` at the back of the manual queue.
-- **`add_to_queue_bulk`** — the same, per video id, reporting a *per-item*
+- **`add_to_queue_bulk`** — the same, per video id, reporting a _per-item_
   outcome rather than aborting the whole batch on the first duplicate.
   This is deliberately different from the scheduler's bulk operations:
   duplicate-video skips during a bulk add are expected and benign, while a
-  partial bulk *schedule* would leave the calendar in a confusing
+  partial bulk _schedule_ would leave the calendar in a confusing
   half-filled state, which is why that one is transactional.
 - **`cancel`** / **`archive`** — `Publication::transition` to
   `Cancelled`/`Archived` (never delete), and remove the `QueueItem` row
@@ -223,7 +223,7 @@ was extended to accept them, extending the existing `JobRunner`
 vocabulary rather than introducing a second job engine (section 5).
 `QueueReconciliation` corresponds to `PublicationService::reconcile_queue`
 and is exercised at startup. The other three job types are reserved
-vocabulary for a future *background/async* trigger (e.g. a nightly
+vocabulary for a future _background/async_ trigger (e.g. a nightly
 "auto-schedule everything" cron) — in Phase 3, the equivalent
 user-triggered actions (the Queue's "Auto-schedule", the Channel editor's
 implicit "Rebuild Schedule" after an edit, "Fill Empty Slots") call
@@ -262,14 +262,14 @@ case the exact resolved time shifted (e.g. a DST edge).
 
 `ScheduleSlotService` (`application/schedule_slot_service.rs`) is pure CRUD
 orchestration around `ScheduleSlot`/`ScheduleException` — the algorithm
-that actually *uses* this data lives in `domain::scheduling`. The Channels
+that actually _uses_ this data lives in `domain::scheduling`. The Channels
 screen's schedule drawer (`src/features/channels/channel-schedule-drawer.tsx`)
 lets an operator add/remove per-weekday slots (channel-default or
 platform-specific), toggle a slot active/paused without deleting it, copy
 one day's slots to every other day, and manage skip-date exceptions. The
 drawer shows a simple "active slot count" as a next-7-days capacity
 estimate — correct because any 7 consecutive days cover each weekday
-exactly once, so the total *active* slot count equals the slot count in
+exactly once, so the total _active_ slot count equals the slot count in
 any 7-day window (skip exceptions inside that window are not subtracted,
 a documented simplification rather than a bug).
 
@@ -296,7 +296,7 @@ state to reconcile.
 - **Command palette / context menu Phase 3 actions**: Queue/Calendar
   navigation is already reachable via the command palette's existing
   generic "Go to <screen>" entries (every `nav-items.ts` route gets one
-  automatically); no *channel-scoped* action (auto-schedule, rebuild) was
+  automatically); no _channel-scoped_ action (auto-schedule, rebuild) was
   added to the palette since none of them have a sensible contextless
   invocation from a global command surface — a "Publish Now" queue-item
   context-menu entry was likewise not added since Phase 3 has no

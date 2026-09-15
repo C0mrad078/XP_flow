@@ -157,7 +157,7 @@ returns `DomainError::InvalidTransition` rather than allowing an impossible jump
 directly). This is unit tested (`cargo test -p xp-flow domain::publication`) for the happy path, invalid skips,
 terminal-state enforcement, and the failure/retry loop. Phase 3 (`docs/scheduler.md`) drives this machine for real —
 `Ready → Queued` on "Add to Queue", `Queued → Scheduled` on manual/auto-schedule, `Scheduled → Queued` on unschedule —
-without adding a single new state; "Overdue" is deliberately a *derived* label
+without adding a single new state; "Overdue" is deliberately a _derived_ label
 (`Publication::is_overdue`/`isPublicationOverdue`), never a persisted status.
 
 ### Error architecture
