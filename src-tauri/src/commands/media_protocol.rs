@@ -76,6 +76,7 @@ async fn handle_request(app: &AppHandle, request: Request<Vec<u8>>) -> Response<
                 .header("Accept-Ranges", "bytes")
                 .header("Content-Range", format!("bytes {start}-{end}/{file_size}"))
                 .header("Content-Length", length.to_string())
+                .header(CACHE_CONTROL_HEADER.0, CACHE_CONTROL_HEADER.1)
                 .body(buffer)
                 .unwrap_or_else(|_| not_found())
         }
@@ -90,11 +91,20 @@ async fn handle_request(app: &AppHandle, request: Request<Vec<u8>>) -> Response<
                 .header("Content-Type", mime.as_ref())
                 .header("Accept-Ranges", "bytes")
                 .header("Content-Length", buffer.len().to_string())
+                .header(CACHE_CONTROL_HEADER.0, CACHE_CONTROL_HEADER.1)
                 .body(buffer)
                 .unwrap_or_else(|_| not_found())
         }
     }
 }
+
+/// Section 99 quality review: `/thumbnail/<id>` is a stable URL that
+/// `ContentService::regenerate_thumbnail` overwrites in place — without
+/// this, the webview's HTTP cache could keep serving the pre-regeneration
+/// image indefinitely since the URL never changes. Serving both routes
+/// as always-revalidate is simplest and costs nothing extra for local
+/// disk reads.
+const CACHE_CONTROL_HEADER: (&str, &str) = ("Cache-Control", "no-cache");
 
 enum RequestKind {
     Video,

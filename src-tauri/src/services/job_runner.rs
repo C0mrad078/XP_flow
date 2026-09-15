@@ -436,14 +436,22 @@ impl JobRunner {
 
         let mut seen_paths: HashSet<String> = HashSet::new();
 
-        let entries: Vec<PathBuf> = WalkDir::new(&root)
-            .max_depth(max_depth)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file() && is_supported_video_extension(e.path()))
-            .map(|e| e.into_path())
-            .collect();
+        // Section 99 quality review: a synchronous directory walk of a
+        // large folder can take long enough to starve other work on this
+        // Tokio worker thread — run it on the blocking pool instead.
+        let walk_root = root.clone();
+        let entries: Vec<PathBuf> = tokio::task::spawn_blocking(move || {
+            WalkDir::new(&walk_root)
+                .max_depth(max_depth)
+                .follow_links(false)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file() && is_supported_video_extension(e.path()))
+                .map(|e| e.into_path())
+                .collect()
+        })
+        .await
+        .unwrap_or_default();
 
         for path in entries {
             summary.scanned += 1;

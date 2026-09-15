@@ -581,4 +581,37 @@ mod tests {
             "neither video was assigned a channel"
         );
     }
+
+    /// Section 99 quality review: proves the DB-level safety net for the
+    /// exact-duplicate race window (migration 0003) actually rejects a
+    /// second row with the same (workspace_id, content_hash) — the
+    /// scenario two concurrent ingestions of identical content could hit
+    /// if they both pass the application-level `get_by_hash` check before
+    /// either commits.
+    #[tokio::test]
+    async fn the_database_rejects_a_second_row_with_the_same_content_hash() {
+        let (repo, workspace_id, source_id) = seeded_repo().await;
+
+        let mut first = insert_video(&repo, workspace_id, source_id, "clip-a", "mp4").await;
+        first.content_hash = Some("shared-hash".to_string());
+        repo.update(&first).await.unwrap();
+
+        let mut second = Video::new(
+            workspace_id,
+            source_id,
+            None,
+            "clip-b.mp4",
+            "clip-b",
+            "/videos/clip-b.mp4",
+            2048,
+            "mp4",
+        );
+        second.content_hash = Some("shared-hash".to_string());
+
+        let result = repo.create(&second).await;
+        assert!(
+            result.is_err(),
+            "a second row with the same content_hash in the same workspace must be rejected"
+        );
+    }
 }

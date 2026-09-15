@@ -25,7 +25,12 @@ impl FfmpegMediaService {
             };
         };
 
-        match Command::new(&path).arg("-version").output().await {
+        match Command::new(&path)
+            .kill_on_drop(true)
+            .arg("-version")
+            .output()
+            .await
+        {
             Ok(output) if output.status.success() => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let version = stdout.lines().next().map(str::to_string);

@@ -78,6 +78,9 @@ impl MediaProbeService for FfprobeMediaProbeService {
         })?;
 
         let output = Command::new(&binary)
+            // Section 99 quality review: if this task is dropped mid-flight
+            // (e.g. an abrupt app shutdown), don't leave ffprobe running.
+            .kill_on_drop(true)
             .args([
                 "-v",
                 "error",

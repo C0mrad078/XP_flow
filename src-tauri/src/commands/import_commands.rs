@@ -50,14 +50,20 @@ pub async fn import_folder(
         .await?;
 
     let max_depth = if recursive { usize::MAX } else { 1 };
-    let paths: Vec<PathBuf> = WalkDir::new(&folder_path)
-        .max_depth(max_depth)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file() && is_supported_video_extension(e.path()))
-        .map(|e| e.into_path())
-        .collect();
+    // Section 99 quality review: don't walk a potentially large folder
+    // synchronously on the async command's thread.
+    let paths: Vec<PathBuf> = tokio::task::spawn_blocking(move || {
+        WalkDir::new(&folder_path)
+            .max_depth(max_depth)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file() && is_supported_video_extension(e.path()))
+            .map(|e| e.into_path())
+            .collect()
+    })
+    .await
+    .unwrap_or_default();
 
     Ok(state
         .job_runner

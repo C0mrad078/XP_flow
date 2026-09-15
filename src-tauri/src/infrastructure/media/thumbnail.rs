@@ -60,6 +60,9 @@ impl ThumbnailService for FfmpegThumbnailService {
         let timestamp = Self::pick_timestamp_seconds(duration_ms);
 
         let output = Command::new(&binary)
+            // Section 99 quality review: don't leave ffmpeg running if this
+            // task is dropped mid-flight.
+            .kill_on_drop(true)
             .args(["-y", "-ss"])
             .arg(format!("{timestamp:.3}"))
             .arg("-i")
