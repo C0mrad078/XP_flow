@@ -15,6 +15,8 @@ import { useSources } from "@/hooks/use-sources";
 import { useContentStore } from "@/stores/content-store";
 import type { VideoSort } from "@/types/media";
 
+import { AddToQueueDialog } from "@/features/queue/add-to-queue-dialog";
+
 import { AddFolderDialog } from "./add-folder-dialog";
 import { BulkActionBar } from "./bulk-action-bar";
 import { ContentDetailsDrawer } from "./content-details-drawer";
@@ -48,6 +50,8 @@ export function ContentPage() {
   const setFilters = useContentStore((state) => state.setFilters);
   const selectedIds = useContentStore((state) => state.selectedIds);
   const toggleSelected = useContentStore((state) => state.toggleSelected);
+  const addToQueueVideoIds = useContentStore((state) => state.addToQueueVideoIds);
+  const closeAddToQueue = useContentStore((state) => state.closeAddToQueue);
 
   const { isDraggingOver } = useFileDrop();
   useQuickPreviewKeys();
@@ -173,6 +177,13 @@ export function ContentPage() {
       <QuickPreviewOverlay />
       <DropZoneOverlay visible={isDraggingOver} />
       <AddFolderDialog open={addFolderOpen} onOpenChange={setAddFolderOpen} />
+      {addToQueueVideoIds && (
+        <AddToQueueDialog
+          videoIds={addToQueueVideoIds}
+          open={addToQueueVideoIds !== null}
+          onOpenChange={(open) => !open && closeAddToQueue()}
+        />
+      )}
     </PageContainer>
   );
 }

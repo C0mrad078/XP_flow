@@ -1,31 +1,51 @@
 import { useState } from "react";
-import { Calendar, LayoutGrid, List, Plus, Rows3 } from "lucide-react";
+import { Calendar, LayoutGrid, ListPlus, List, Rows3 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 
 import { PageContainer } from "@/components/common/page-container";
 import { PageHeader } from "@/components/common/page-header";
 import { EmptyState } from "@/components/feedback/empty-state";
+import { ErrorState } from "@/components/feedback/error-state";
+import { LoadingState } from "@/components/feedback/loading-state";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { mockQueueItems } from "@/development/mock-data/queue";
+import { useChannels } from "@/hooks/use-channels";
+import { useQueueList } from "@/hooks/use-queue";
 import { isFeatureEnabled } from "@/lib/utilities/feature-flags";
+import { useWorkspaceStore } from "@/stores/workspace-store";
+import type { Publication } from "@/types/domain";
 
+import { PublicationDetailsDrawer } from "./publication-details-drawer";
 import { QueueListView } from "./queue-list-view";
 import { QueueTimelineView } from "./queue-timeline-view";
 
 type QueueViewMode = "timeline" | "list";
 
-/** Future view modes the Queue screen is architected for (section 27) but
- * does not implement yet — shown disabled so the eventual UI surface is
- * visible without pretending the mode already works. */
+/** Future view modes the Queue screen is architected for but does not
+ * implement yet — shown disabled so the eventual UI surface is visible
+ * without pretending the mode already works. */
 const FUTURE_VIEW_MODES = [
   { id: "compact", label: "Compact", icon: Rows3 },
-  { id: "calendar", label: "Calendar", icon: Calendar },
   { id: "kanban", label: "Kanban", icon: LayoutGrid },
 ];
 
 export function QueuePage() {
   const [viewMode, setViewMode] = useState<QueueViewMode>("timeline");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const navigate = useNavigate();
+  const timezone = useWorkspaceStore((state) => state.workspace?.timezone ?? "UTC");
+
+  const { data: channels = [] } = useChannels();
+  const {
+    data: page,
+    isLoading,
+    isError,
+    refetch,
+  } = useQueueList({ statuses: ["queued", "scheduled"], page_size: 200 });
+
+  const channelNames = new Map(channels.map((c) => [c.id, c.name]));
+  const publications: Publication[] = page?.items ?? [];
 
   return (
     <PageContainer>
@@ -33,8 +53,8 @@ export function QueuePage() {
         title="Queue"
         description="Every publication scheduled to go out, across every channel and platform."
         actions={
-          <Button size="sm">
-            <Plus />
+          <Button size="sm" onClick={() => navigate("/content")}>
+            <ListPlus />
             Add to queue
           </Button>
         }
@@ -54,9 +74,24 @@ export function QueuePage() {
           </TabsList>
         </Tabs>
 
-        {!isFeatureEnabled("queueKanbanView") && (
-          <div className="flex items-center gap-1">
-            {FUTURE_VIEW_MODES.map((mode) => (
+        <div className="flex items-center gap-1">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => navigate("/calendar")}
+                  aria-label="Calendar view"
+                >
+                  <Calendar className="size-4" />
+                </Button>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>Open Calendar</TooltipContent>
+          </Tooltip>
+          {!isFeatureEnabled("queueKanbanView") &&
+            FUTURE_VIEW_MODES.map((mode) => (
               <Tooltip key={mode.id}>
                 <TooltipTrigger asChild>
                   <span>
@@ -73,21 +108,45 @@ export function QueuePage() {
                 <TooltipContent>{mode.label} view — coming soon</TooltipContent>
               </Tooltip>
             ))}
-          </div>
-        )}
+        </div>
       </div>
 
-      {mockQueueItems.length === 0 ? (
+      {isLoading && <LoadingState label="Loading queue…" />}
+      {isError && <ErrorState onRetry={() => refetch()} />}
+
+      {page && publications.length === 0 && (
         <EmptyState
           icon={Rows3}
           title="Queue is empty"
           description="Import videos from the Content library and add them to the queue to schedule publications."
+          action={
+            <Button size="sm" onClick={() => navigate("/content")}>
+              <ListPlus />
+              Add to queue
+            </Button>
+          }
         />
-      ) : viewMode === "timeline" ? (
-        <QueueTimelineView items={mockQueueItems} />
-      ) : (
-        <QueueListView items={mockQueueItems} />
       )}
+
+      {page &&
+        publications.length > 0 &&
+        (viewMode === "timeline" ? (
+          <QueueTimelineView
+            publications={publications}
+            channelNames={channelNames}
+            timezone={timezone}
+            onSelect={(p) => setSelectedId(p.id)}
+          />
+        ) : (
+          <QueueListView
+            publications={publications}
+            channelNames={channelNames}
+            timezone={timezone}
+            onSelect={(p) => setSelectedId(p.id)}
+          />
+        ))}
+
+      <PublicationDetailsDrawer publicationId={selectedId} onClose={() => setSelectedId(null)} />
     </PageContainer>
   );
 }

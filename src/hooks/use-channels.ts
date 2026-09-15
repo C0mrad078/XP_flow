@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { channelsApi } from "@/lib/tauri";
+import { channelsApi, type ChannelStatus } from "@/lib/tauri";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 
 export function useChannels() {
@@ -17,6 +17,15 @@ export function useCreateChannel() {
   const workspaceId = useWorkspaceStore((state) => state.workspace?.id);
   return useMutation({
     mutationFn: (name: string) => channelsApi.create(workspaceId!, name),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["channels", workspaceId] }),
+  });
+}
+
+export function useSetChannelStatus() {
+  const queryClient = useQueryClient();
+  const workspaceId = useWorkspaceStore((state) => state.workspace?.id);
+  return useMutation({
+    mutationFn: ({ id, status }: { id: string; status: ChannelStatus }) => channelsApi.setStatus(id, status),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["channels", workspaceId] }),
   });
 }

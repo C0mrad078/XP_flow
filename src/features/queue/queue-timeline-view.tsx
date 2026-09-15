@@ -1,32 +1,47 @@
 import { QueueItemCard } from "./queue-item-card";
-import type { MockQueueItem } from "@/development/mock-data/queue";
-import { formatDate } from "@/lib/formatting/date";
+import { formatDateInZone, localDateKeyInZone } from "@/lib/formatting/date";
+import type { Publication, UUID } from "@/types/domain";
 
-function dayLabel(iso: string): string {
-  const date = new Date(iso);
-  const today = new Date();
-  const tomorrow = new Date(today);
-  tomorrow.setDate(today.getDate() + 1);
-
-  if (isSameDay(date, today)) return "Today";
-  if (isSameDay(date, tomorrow)) return "Tomorrow";
-  return formatDate(iso);
+export interface QueueTimelineViewProps {
+  publications: Publication[];
+  channelNames: Map<UUID, string>;
+  timezone: string;
+  onSelect?: (publication: Publication) => void;
 }
 
-function isSameDay(a: Date, b: Date): boolean {
-  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+const UNSCHEDULED_LABEL = "Unscheduled";
+
+function dayLabel(iso: string, timezone: string): string {
+  const key = localDateKeyInZone(iso, timezone);
+  const now = new Date();
+  const todayKey = localDateKeyInZone(now.toISOString(), timezone);
+  const tomorrow = new Date(now);
+  tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+  const tomorrowKey = localDateKeyInZone(tomorrow.toISOString(), timezone);
+
+  if (key === todayKey) return "Today";
+  if (key === tomorrowKey) return "Tomorrow";
+  return formatDateInZone(iso, timezone);
 }
 
-export function QueueTimelineView({ items }: { items: MockQueueItem[] }) {
-  const sorted = [...items].sort(
-    (a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime(),
-  );
+export function QueueTimelineView({
+  publications,
+  channelNames,
+  timezone,
+  onSelect,
+}: QueueTimelineViewProps) {
+  const groups = new Map<string, Publication[]>();
+  const unscheduled = publications.filter((p) => !p.scheduled_at);
+  if (unscheduled.length > 0) groups.set(UNSCHEDULED_LABEL, unscheduled);
 
-  const groups = new Map<string, MockQueueItem[]>();
-  for (const item of sorted) {
-    const label = dayLabel(item.scheduledAt);
+  const scheduled = [...publications]
+    .filter((p): p is Publication & { scheduled_at: string } => p.scheduled_at !== null)
+    .sort((a, b) => new Date(a.scheduled_at).getTime() - new Date(b.scheduled_at).getTime());
+
+  for (const publication of scheduled) {
+    const label = dayLabel(publication.scheduled_at, timezone);
     const bucket = groups.get(label) ?? [];
-    bucket.push(item);
+    bucket.push(publication);
     groups.set(label, bucket);
   }
 
@@ -40,10 +55,15 @@ export function QueueTimelineView({ items }: { items: MockQueueItem[] }) {
           </div>
           <div className="relative flex-1 border-l border-border pl-5">
             <div className="flex flex-col gap-2.5">
-              {groupItems.map((item) => (
-                <div key={item.id} className="relative">
+              {groupItems.map((publication) => (
+                <div key={publication.id} className="relative">
                   <span className="absolute -left-[25px] top-1/2 size-2 -translate-y-1/2 rounded-full border-2 border-background bg-primary" />
-                  <QueueItemCard item={item} />
+                  <QueueItemCard
+                    publication={publication}
+                    channelName={channelNames.get(publication.channel_id) ?? "Unknown channel"}
+                    timezone={timezone}
+                    onClick={onSelect ? () => onSelect(publication) : undefined}
+                  />
                 </div>
               ))}
             </div>

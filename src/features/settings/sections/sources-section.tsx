@@ -11,6 +11,7 @@ import { useDeleteSource, useScanSourceNow, useSources, useUpdateSource } from "
 import { formatRelativeTime } from "@/lib/formatting/date";
 import { formatInteger } from "@/lib/formatting/number";
 import { cn } from "@/lib/utilities/cn";
+import { confirmAction } from "@/stores/confirm-store";
 import { toast } from "@/stores/toast-store";
 import { isAppError } from "@/types/domain";
 
@@ -114,10 +115,14 @@ export function SourcesSection() {
                     <IconButton
                       label="Remove source"
                       size="sm"
-                      onClick={() => {
-                        if (window.confirm(`Remove "${source.name}"? Indexed videos stay in your library.`)) {
-                          deleteSource.mutate(source.id);
-                        }
+                      onClick={async () => {
+                        const confirmed = await confirmAction({
+                          title: `Remove "${source.name}"?`,
+                          description: "Indexed videos stay in your library.",
+                          confirmLabel: "Remove",
+                          destructive: true,
+                        });
+                        if (confirmed) deleteSource.mutate(source.id);
                       }}
                     >
                       <Trash2 className="size-3.5" />

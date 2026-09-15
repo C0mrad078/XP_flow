@@ -5,35 +5,41 @@ import { PageContainer } from "@/components/common/page-container";
 import { PageHeader } from "@/components/common/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PlatformBadge } from "@/components/ui/platform-badge";
-import { getTodayQueueItems, type MockQueueItem } from "@/development/mock-data/queue";
-import { formatTime } from "@/lib/formatting/date";
-import type { Platform, PublicationStatus } from "@/types/domain";
+import { useChannels } from "@/hooks/use-channels";
+import { useCalendarRange, useDuePublications } from "@/hooks/use-scheduler";
+import { formatTimeInZone, localDateKeyInZone } from "@/lib/formatting/date";
+import { useWorkspaceStore } from "@/stores/workspace-store";
+import type { CalendarPublication } from "@/types/scheduling";
+import type { PublicationStatus } from "@/types/domain";
 
 const FAILURE_STATUSES: PublicationStatus[] = ["failed", "blocked"];
 const ACTIVE_STATUSES: PublicationStatus[] = ["uploading", "processing"];
 const WARNING_STATUSES: PublicationStatus[] = ["auth_required", "rate_limited", "paused", "duplicate"];
 
-function statuses(item: MockQueueItem): PublicationStatus[] {
-  return Object.values(item.platforms) as PublicationStatus[];
-}
-
-function classify(item: MockQueueItem): "failed" | "active" | "warning" | "published" | "remaining" {
-  const values = statuses(item);
-  if (values.some((s) => FAILURE_STATUSES.includes(s))) return "failed";
-  if (values.some((s) => ACTIVE_STATUSES.includes(s))) return "active";
-  if (values.some((s) => WARNING_STATUSES.includes(s))) return "warning";
-  if (values.every((s) => s === "published")) return "published";
+function classify(item: CalendarPublication): "failed" | "active" | "warning" | "published" | "remaining" {
+  const status = item.publication.status;
+  if (FAILURE_STATUSES.includes(status)) return "failed";
+  if (ACTIVE_STATUSES.includes(status)) return "active";
+  if (WARNING_STATUSES.includes(status)) return "warning";
+  if (status === "published") return "published";
   return "remaining";
 }
 
 export function TodayPage() {
-  const todayItems = getTodayQueueItems();
+  const timezone = useWorkspaceStore((state) => state.workspace?.timezone ?? "UTC");
+  const workspaceId = useWorkspaceStore((state) => state.workspace?.id ?? null);
+  const todayKey = localDateKeyInZone(new Date().toISOString(), timezone);
+  const { data: calendarItems = [] } = useCalendarRange(null, todayKey, todayKey);
+  const { data: overdue = [] } = useDuePublications();
+  const { data: channels = [] } = useChannels();
+  const channelNames = new Map(channels.map((c) => [c.id, c.name]));
+
   const buckets = {
-    published: todayItems.filter((i) => classify(i) === "published"),
-    remaining: todayItems.filter((i) => classify(i) === "remaining"),
-    failed: todayItems.filter((i) => classify(i) === "failed"),
-    active: todayItems.filter((i) => classify(i) === "active"),
-    warning: todayItems.filter((i) => classify(i) === "warning"),
+    published: calendarItems.filter((i) => classify(i) === "published"),
+    remaining: calendarItems.filter((i) => classify(i) === "remaining"),
+    failed: calendarItems.filter((i) => classify(i) === "failed"),
+    active: calendarItems.filter((i) => classify(i) === "active"),
+    warning: calendarItems.filter((i) => classify(i) === "warning"),
   };
 
   return (
@@ -58,18 +64,38 @@ export function TodayPage() {
           value={buckets.active.length}
           spin
         />
-        <StatTile icon={XCircle} tone="danger" label="Failures" value={buckets.failed.length} />
+        <StatTile
+          icon={XCircle}
+          tone="danger"
+          label={workspaceId ? "Overdue" : "Failures"}
+          value={workspaceId ? overdue.length : buckets.failed.length}
+        />
       </div>
 
-      {buckets.warning.length > 0 && (
+      {(buckets.warning.length > 0 || overdue.length > 0) && (
         <Card className="border-warning/30 bg-warning/[0.04]">
           <CardHeader className="flex-row items-center gap-2 space-y-0">
             <AlertTriangle className="size-4 text-warning" />
             <CardTitle className="text-warning">Operational warnings</CardTitle>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
+            {overdue.map((publication) => (
+              <div key={publication.id} className="flex items-center gap-3">
+                <MediaThumbnail seed={publication.video_id} className="h-12 w-8" />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-body-small font-medium text-foreground">{publication.title}</p>
+                  <p className="text-caption normal-case tracking-normal text-danger">Overdue</p>
+                </div>
+                <PlatformBadge platform={publication.platform} size="sm" iconOnly />
+              </div>
+            ))}
             {buckets.warning.map((item) => (
-              <QueueRow key={item.id} item={item} />
+              <QueueRow
+                key={item.publication.id}
+                item={item}
+                channelName={channelNames.get(item.publication.channel_id)}
+                timezone={timezone}
+              />
             ))}
           </CardContent>
         </Card>
@@ -79,13 +105,29 @@ export function TodayPage() {
         <QueueSection
           title="Currently uploading"
           items={buckets.active}
+          channelNames={channelNames}
+          timezone={timezone}
           emptyLabel="Nothing uploading right now"
         />
-        <QueueSection title="Failures" items={buckets.failed} emptyLabel="No failures today" />
-        <QueueSection title="Published today" items={buckets.published} emptyLabel="Nothing published yet" />
+        <QueueSection
+          title="Failures"
+          items={buckets.failed}
+          channelNames={channelNames}
+          timezone={timezone}
+          emptyLabel="No failures today"
+        />
+        <QueueSection
+          title="Published today"
+          items={buckets.published}
+          channelNames={channelNames}
+          timezone={timezone}
+          emptyLabel="Nothing published yet"
+        />
         <QueueSection
           title="Remaining today"
           items={buckets.remaining}
+          channelNames={channelNames}
+          timezone={timezone}
           emptyLabel="Queue is clear for today"
         />
       </div>
@@ -96,10 +138,14 @@ export function TodayPage() {
 function QueueSection({
   title,
   items,
+  channelNames,
+  timezone,
   emptyLabel,
 }: {
   title: string;
-  items: MockQueueItem[];
+  items: CalendarPublication[];
+  channelNames: Map<string, string>;
+  timezone: string;
   emptyLabel: string;
 }) {
   return (
@@ -115,7 +161,12 @@ function QueueSection({
         ) : (
           <div className="flex flex-col gap-3">
             {items.map((item) => (
-              <QueueRow key={item.id} item={item} />
+              <QueueRow
+                key={item.publication.id}
+                item={item}
+                channelName={channelNames.get(item.publication.channel_id)}
+                timezone={timezone}
+              />
             ))}
           </div>
         )}
@@ -124,21 +175,26 @@ function QueueSection({
   );
 }
 
-function QueueRow({ item }: { item: MockQueueItem }) {
+function QueueRow({
+  item,
+  channelName,
+  timezone,
+}: {
+  item: CalendarPublication;
+  channelName?: string;
+  timezone: string;
+}) {
+  const { publication } = item;
   return (
     <div className="flex items-center gap-3">
-      <MediaThumbnail seed={item.id} durationSeconds={item.durationSeconds} className="h-12 w-8" />
+      <MediaThumbnail seed={publication.video_id} className="h-12 w-8" />
       <div className="min-w-0 flex-1">
-        <p className="truncate text-body-small font-medium text-foreground">{item.videoTitle}</p>
-        <p className="text-caption normal-case tracking-normal">{item.channelName}</p>
+        <p className="truncate text-body-small font-medium text-foreground">{publication.title}</p>
+        <p className="text-caption normal-case tracking-normal">{channelName ?? "Unknown channel"}</p>
       </div>
-      <div className="flex items-center gap-1">
-        {(Object.keys(item.platforms) as Platform[]).map((platform) => (
-          <PlatformBadge key={platform} platform={platform} size="sm" iconOnly />
-        ))}
-      </div>
+      <PlatformBadge platform={publication.platform} size="sm" iconOnly />
       <span className="w-14 shrink-0 text-right font-mono-data text-body-small text-muted-foreground">
-        {formatTime(item.scheduledAt)}
+        {publication.scheduled_at ? formatTimeInZone(publication.scheduled_at, timezone) : "—"}
       </span>
     </div>
   );

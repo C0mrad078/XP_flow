@@ -55,6 +55,10 @@ interface ContentState {
   quickPreviewVideoId: string | null;
   openQuickPreview: (id: string) => void;
   closeQuickPreview: () => void;
+
+  addToQueueVideoIds: string[] | null;
+  openAddToQueue: (ids: string[]) => void;
+  closeAddToQueue: () => void;
 }
 
 export const useContentStore = create<ContentState>()(
@@ -91,6 +95,10 @@ export const useContentStore = create<ContentState>()(
         set({ quickPreviewVideoId: id });
       },
       closeQuickPreview: () => set({ quickPreviewVideoId: null }),
+
+      addToQueueVideoIds: null,
+      openAddToQueue: (ids) => set({ addToQueueVideoIds: ids }),
+      closeAddToQueue: () => set({ addToQueueVideoIds: null }),
     }),
     {
       name: "xpflow-content-ui",

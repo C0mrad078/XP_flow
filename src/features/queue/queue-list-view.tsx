@@ -1,15 +1,25 @@
 import { QueueItemCard } from "./queue-item-card";
-import type { MockQueueItem } from "@/development/mock-data/queue";
+import type { Publication, UUID } from "@/types/domain";
 
-export function QueueListView({ items }: { items: MockQueueItem[] }) {
-  const sorted = [...items].sort(
-    (a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime(),
-  );
+export interface QueueListViewProps {
+  publications: Publication[];
+  channelNames: Map<UUID, string>;
+  timezone: string;
+  onSelect?: (publication: Publication) => void;
+}
 
+export function QueueListView({ publications, channelNames, timezone, onSelect }: QueueListViewProps) {
   return (
     <div className="flex flex-col gap-2">
-      {sorted.map((item) => (
-        <QueueItemCard key={item.id} item={item} dense />
+      {publications.map((publication) => (
+        <QueueItemCard
+          key={publication.id}
+          publication={publication}
+          channelName={channelNames.get(publication.channel_id) ?? "Unknown channel"}
+          timezone={timezone}
+          dense
+          onClick={onSelect ? () => onSelect(publication) : undefined}
+        />
       ))}
     </div>
   );

@@ -36,6 +36,42 @@ export function formatDate(isoDateTime: string): string {
   return dateFormatter.format(new Date(isoDateTime));
 }
 
+/** Queue/Calendar formatters that respect the *workspace's* configured
+ * IANA timezone (section 19) rather than the OS/browser's — the two are
+ * not guaranteed to match, and the backend is explicit that scheduling
+ * must never rely blindly on the local machine's zone. */
+export function formatTimeInZone(isoDateTime: string, timezone: string): string {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: timezone,
+  }).format(new Date(isoDateTime));
+}
+
+export function formatDateTimeInZone(isoDateTime: string, timezone: string): string {
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: timezone,
+  }).format(new Date(isoDateTime));
+}
+
+export function formatDateInZone(isoDateTime: string, timezone: string): string {
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: timezone,
+  }).format(new Date(isoDateTime));
+}
+
+/** "YYYY-MM-DD" in `timezone` — a stable grouping/comparison key, not for display. */
+export function localDateKeyInZone(isoDateTime: string, timezone: string): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: timezone }).format(new Date(isoDateTime));
+}
+
 export function formatRelativeTime(isoDateTime: string, now: Date = new Date()): string {
   const date = new Date(isoDateTime);
   const diffMs = date.getTime() - now.getTime();

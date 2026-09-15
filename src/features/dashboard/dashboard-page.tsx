@@ -9,24 +9,30 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Metric } from "@/components/ui/metric";
 import { PlatformBadge } from "@/components/ui/platform-badge";
 import { activityApi } from "@/lib/tauri";
+import { useChannels } from "@/hooks/use-channels";
+import { useQueueList } from "@/hooks/use-queue";
 import { formatCompactNumber, formatPercent } from "@/lib/formatting/number";
-import { formatRelativeTime, formatTime } from "@/lib/formatting/date";
+import { formatRelativeTime, formatTimeInZone } from "@/lib/formatting/date";
 import { mockActivityEvents } from "@/development/mock-data/activity";
 import {
   mockDashboardMetrics,
   mockPlatformOverview,
   mockViewsSeries,
 } from "@/development/mock-data/dashboard";
-import { mockQueueItems } from "@/development/mock-data/queue";
-import type { ActivityEvent, Platform } from "@/types/domain";
-
-const upcomingPublications = mockQueueItems
-  .filter((item) => new Date(item.scheduledAt).getTime() > Date.now())
-  .sort((a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime())
-  .slice(0, 4);
+import { useWorkspaceStore } from "@/stores/workspace-store";
+import type { ActivityEvent } from "@/types/domain";
 
 export function DashboardPage() {
   const [activity, setActivity] = useState<ActivityEvent[]>(mockActivityEvents);
+  const timezone = useWorkspaceStore((state) => state.workspace?.timezone ?? "UTC");
+  const { data: channels = [] } = useChannels();
+  const channelNames = new Map(channels.map((c) => [c.id, c.name]));
+  const { data: queuePage } = useQueueList({
+    statuses: ["queued", "scheduled"],
+    sort: "queue_order",
+    page_size: 4,
+  });
+  const upcomingPublications = (queuePage?.items ?? []).filter((p) => p.scheduled_at);
 
   useEffect(() => {
     let cancelled = false;
@@ -73,7 +79,11 @@ export function DashboardPage() {
         </Card>
         <Card>
           <CardContent className="p-5">
-            <Metric label="Queued posts" value={String(metrics.queuedPosts)} icon={ListVideo} />
+            <Metric
+              label="Queued posts"
+              value={String(queuePage?.total ?? metrics.queuedPosts)}
+              icon={ListVideo}
+            />
           </CardContent>
         </Card>
         <Card>
@@ -129,20 +139,21 @@ export function DashboardPage() {
             <CardTitle>Next publications</CardTitle>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
-            {upcomingPublications.map((item) => (
-              <div key={item.id} className="flex items-center gap-3">
-                <MediaThumbnail seed={item.id} durationSeconds={item.durationSeconds} className="h-12 w-8" />
+            {upcomingPublications.length === 0 && (
+              <p className="text-body-small py-4 text-center text-muted-foreground">Nothing scheduled yet</p>
+            )}
+            {upcomingPublications.map((publication) => (
+              <div key={publication.id} className="flex items-center gap-3">
+                <MediaThumbnail seed={publication.video_id} className="h-12 w-8" />
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-body-small font-medium text-foreground">{item.videoTitle}</p>
-                  <p className="text-caption normal-case tracking-normal">{item.channelName}</p>
+                  <p className="truncate text-body-small font-medium text-foreground">{publication.title}</p>
+                  <p className="text-caption normal-case tracking-normal">
+                    {channelNames.get(publication.channel_id) ?? "Unknown channel"}
+                  </p>
                 </div>
-                <div className="flex items-center gap-1">
-                  {(Object.keys(item.platforms) as Platform[]).map((platform) => (
-                    <PlatformBadge key={platform} platform={platform} size="sm" iconOnly />
-                  ))}
-                </div>
+                <PlatformBadge platform={publication.platform} size="sm" iconOnly />
                 <span className="w-14 shrink-0 text-right font-mono-data text-body-small text-muted-foreground">
-                  {formatTime(item.scheduledAt)}
+                  {publication.scheduled_at ? formatTimeInZone(publication.scheduled_at, timezone) : "—"}
                 </span>
               </div>
             ))}

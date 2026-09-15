@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import { AppShell } from "@/app/layouts/app-shell";
 import { AppProviders } from "@/app/providers/app-providers";
+import { ConfirmDialogHost } from "@/components/feedback/confirm-dialog";
 import { Toaster } from "@/components/feedback/toaster";
 import { LoadingState } from "@/components/feedback/loading-state";
 import { OnboardingScreen } from "@/features/onboarding/onboarding-screen";
@@ -93,6 +94,7 @@ export function App() {
     <AppProviders>
       <AppContent />
       <Toaster />
+      <ConfirmDialogHost />
     </AppProviders>
   );
 }

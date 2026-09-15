@@ -21,6 +21,9 @@ export const PLATFORM_LABELS: Record<Platform, string> = {
 export interface Workspace {
   id: UUID;
   name: string;
+  /** IANA timezone identifier (e.g. "America/Sao_Paulo") — every schedule
+   * slot and calendar view is interpreted in this zone, never the OS's. */
+  timezone: string;
   created_at: ISODateTime;
   updated_at: ISODateTime;
 }
@@ -46,6 +49,7 @@ export type PublicationStatus =
 
 export interface Publication {
   id: UUID;
+  workspace_id: UUID;
   video_id: UUID;
   channel_id: UUID;
   platform_account_id: UUID | null;
@@ -54,6 +58,8 @@ export interface Publication {
   title: string;
   description: string | null;
   hashtags: string[];
+  priority: import("./media").VideoPriority;
+  locked: boolean;
   scheduled_at: ISODateTime | null;
   published_at: ISODateTime | null;
   remote_id: string | null;
@@ -61,6 +67,16 @@ export interface Publication {
   last_error: string | null;
   created_at: ISODateTime;
   updated_at: ISODateTime;
+}
+
+/** Derived (never persisted) — a Scheduled publication whose scheduled_at
+ * has already passed. Mirrors `Publication::is_overdue` in Rust. */
+export function isPublicationOverdue(publication: Publication, now: Date = new Date()): boolean {
+  return (
+    publication.status === "scheduled" &&
+    publication.scheduled_at !== null &&
+    new Date(publication.scheduled_at) < now
+  );
 }
 
 export type ActivityCategory = "system" | "content" | "publication" | "platform" | "warning" | "error";

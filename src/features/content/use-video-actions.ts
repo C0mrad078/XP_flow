@@ -1,5 +1,15 @@
 import type { LucideIcon } from "lucide-react";
-import { Archive, ArchiveRestore, Copy, Eye, FolderOpen, Info, RefreshCw, Trash2 } from "lucide-react";
+import {
+  Archive,
+  ArchiveRestore,
+  Copy,
+  Eye,
+  FolderOpen,
+  Info,
+  ListPlus,
+  RefreshCw,
+  Trash2,
+} from "lucide-react";
 
 import { contentApi } from "@/lib/tauri";
 import {
@@ -8,6 +18,7 @@ import {
   useRevalidateVideo,
   useSetVideoArchived,
 } from "@/hooks/use-content";
+import { confirmAction } from "@/stores/confirm-store";
 import { toast } from "@/stores/toast-store";
 import { useContentStore } from "@/stores/content-store";
 import type { Video } from "@/types/media";
@@ -27,6 +38,7 @@ export interface VideoAction {
 export function useVideoActions(video: Video): VideoAction[] {
   const openDetail = useContentStore((state) => state.openDetail);
   const openQuickPreview = useContentStore((state) => state.openQuickPreview);
+  const openAddToQueue = useContentStore((state) => state.openAddToQueue);
   const revalidate = useRevalidateVideo();
   const regenerateThumbnail = useRegenerateThumbnail();
   const setArchived = useSetVideoArchived();
@@ -52,6 +64,12 @@ export function useVideoActions(video: Video): VideoAction[] {
   return [
     { key: "preview", label: "Preview", icon: Eye, onSelect: () => openQuickPreview(video.id) },
     { key: "details", label: "Open Details", icon: Info, onSelect: () => openDetail(video.id) },
+    {
+      key: "add-to-queue",
+      label: "Add to Queue",
+      icon: ListPlus,
+      onSelect: () => openAddToQueue([video.id]),
+    },
     { key: "reveal", label: "Reveal in File Manager", icon: FolderOpen, onSelect: handleReveal },
     { key: "copy-path", label: "Copy File Path", icon: Copy, onSelect: handleCopyPath },
     {
@@ -102,14 +120,15 @@ export function useVideoActions(video: Video): VideoAction[] {
       label: "Remove from XP FLOW",
       icon: Trash2,
       destructive: true,
-      onSelect: () => {
-        if (
-          !window.confirm(
-            `Remove "${video.display_title}" from XP FLOW?\n\nThe original file on disk will NOT be deleted.`,
-          )
-        ) {
-          return;
-        }
+      onSelect: async () => {
+        const confirmed = await confirmAction({
+          title: `Remove "${video.display_title}"?`,
+          description: "The original file on disk will NOT be deleted.",
+          confirmLabel: "Remove",
+          destructive: true,
+        });
+        if (!confirmed) return;
+
         remove.mutate(video.id, {
           onError: (error) =>
             toast({

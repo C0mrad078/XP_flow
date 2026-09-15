@@ -1,22 +1,23 @@
-import { Archive, ArchiveRestore, RefreshCw, X } from "lucide-react";
+import { useState } from "react";
+import { Archive, ArchiveRestore, ListPlus, RefreshCw, X } from "lucide-react";
 
 import { ChannelPicker } from "@/components/common/channel-picker";
 import { Button } from "@/components/ui/button";
 import { IconButton } from "@/components/ui/icon-button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { AddToQueueDialog } from "@/features/queue/add-to-queue-dialog";
 import { useBulkUpdateVideos } from "@/hooks/use-content";
 import { toast } from "@/stores/toast-store";
 import { useContentStore } from "@/stores/content-store";
 import { VIDEO_PRIORITIES, VIDEO_PRIORITY_LABELS } from "@/types/media";
 import { isAppError } from "@/types/domain";
 
-/** Section 47 — appears once at least one video is selected. Publishing
- * bulk actions (queue, schedule) are intentionally not here yet (section
- * 47/97: deferred to the phase that implements real queueing). */
+/** Section 47 — appears once at least one video is selected. */
 export function BulkActionBar() {
   const selectedIds = useContentStore((state) => state.selectedIds);
   const clearSelection = useContentStore((state) => state.clearSelection);
   const bulkUpdate = useBulkUpdateVideos();
+  const [addToQueueOpen, setAddToQueueOpen] = useState(false);
 
   if (selectedIds.length === 0) return null;
 
@@ -45,6 +46,19 @@ export function BulkActionBar() {
   return (
     <div className="sticky bottom-4 z-(--z-sticky) mx-auto flex w-fit items-center gap-3 rounded-xl border border-border bg-surface-elevated px-4 py-2.5 shadow-xl">
       <span className="text-body-small font-medium text-foreground">{selectedIds.length} selected</span>
+
+      <div className="h-5 w-px bg-border" />
+
+      <Button variant="secondary" size="sm" onClick={() => setAddToQueueOpen(true)}>
+        <ListPlus />
+        Add to queue
+      </Button>
+      <AddToQueueDialog
+        videoIds={selectedIds}
+        open={addToQueueOpen}
+        onOpenChange={setAddToQueueOpen}
+        onDone={clearSelection}
+      />
 
       <div className="h-5 w-px bg-border" />
 
