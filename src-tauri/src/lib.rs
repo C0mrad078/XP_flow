@@ -80,6 +80,8 @@ pub fn run() {
             commands::notification_commands::mark_notification_read,
             commands::system_commands::get_app_info,
             commands::system_commands::get_media_status,
+            commands::system_commands::get_cache_info,
+            commands::system_commands::clear_temp_cache,
             commands::content_commands::list_content,
             commands::content_commands::get_content_summary,
             commands::content_commands::get_video_detail,
