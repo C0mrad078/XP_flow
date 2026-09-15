@@ -1,0 +1,230 @@
+@import "tailwindcss";
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+@import "@fontsource/inter/700.css";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+
+@plugin "tailwindcss-animate";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * XP FLOW design tokens.
+ *
+ * Semantic tokens only — no component ever reaches for a raw hex value.
+ * Dark is the polished default (section 18); light is structurally
+ * complete but not the design priority for Phase 1.
+ */
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --radius-sm: 0.375rem;
+  --radius-md: 0.625rem;
+  --radius-lg: 0.875rem;
+  --radius-xl: 1.25rem;
+
+  --animate-duration-fast: 120ms;
+  --animate-duration-base: 180ms;
+  --animate-duration-slow: 280ms;
+
+  --z-dropdown: 50;
+  --z-sticky: 40;
+  --z-overlay: 60;
+  --z-modal: 70;
+  --z-popover: 80;
+  --z-toast: 90;
+  --z-command-palette: 100;
+
+  /* Platform brand accents — used only for PlatformBadge / platform-scoped
+     status, never as general UI accent color. */
+  --color-youtube: #ff3b30;
+  --color-youtube-foreground: #ffffff;
+  --color-tiktok: #fe2c55;
+  --color-tiktok-foreground: #ffffff;
+  --color-kwai: #ff8a00;
+  --color-kwai-foreground: #1a1000;
+}
+
+:root {
+  --background: oklch(0.145 0.004 285);
+  --surface: oklch(0.185 0.004 285);
+  --surface-elevated: oklch(0.225 0.005 285);
+  --surface-hover: oklch(0.26 0.006 285);
+  --border: oklch(0.29 0.006 285);
+  --border-strong: oklch(0.36 0.007 285);
+  --foreground: oklch(0.97 0.002 285);
+  --muted: oklch(0.63 0.008 285);
+  --muted-foreground: oklch(0.72 0.006 285);
+
+  --primary: oklch(0.62 0.19 291);
+  --primary-foreground: oklch(0.99 0 0);
+  --primary-hover: oklch(0.67 0.19 291);
+
+  --success: oklch(0.72 0.16 155);
+  --success-foreground: oklch(0.15 0.02 155);
+  --warning: oklch(0.8 0.15 85);
+  --warning-foreground: oklch(0.18 0.03 85);
+  --danger: oklch(0.63 0.21 25);
+  --danger-foreground: oklch(0.98 0 0);
+
+  --ring: oklch(0.62 0.19 291);
+  --shadow-color: 285 20% 3%;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --background: oklch(0.985 0.002 285);
+  --surface: oklch(1 0 0);
+  --surface-elevated: oklch(1 0 0);
+  --surface-hover: oklch(0.96 0.003 285);
+  --border: oklch(0.9 0.004 285);
+  --border-strong: oklch(0.82 0.006 285);
+  --foreground: oklch(0.18 0.006 285);
+  --muted: oklch(0.5 0.008 285);
+  --muted-foreground: oklch(0.42 0.008 285);
+  --primary: oklch(0.55 0.2 291);
+  --primary-foreground: oklch(0.99 0 0);
+  --primary-hover: oklch(0.5 0.2 291);
+  --success: oklch(0.6 0.15 155);
+  --success-foreground: oklch(0.99 0 0);
+  --warning: oklch(0.72 0.16 85);
+  --warning-foreground: oklch(0.2 0.03 85);
+  --danger: oklch(0.58 0.22 25);
+  --danger-foreground: oklch(0.99 0 0);
+  --ring: oklch(0.55 0.2 291);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-elevated: var(--surface-elevated);
+  --color-surface-hover: var(--surface-hover);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-hover: var(--primary-hover);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-danger: var(--danger);
+  --color-danger-foreground: var(--danger-foreground);
+  --color-ring: var(--ring);
+}
+
+* {
+  border-color: var(--color-border);
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+#root {
+  height: 100%;
+}
+
+::selection {
+  background-color: color-mix(in oklch, var(--color-primary) 35%, transparent);
+}
+
+/* Thin, unobtrusive scrollbars fit an "operational" desktop tool better
+   than default OS scrollbars inside a dense sidebar/table layout. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: var(--color-border-strong);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+@layer utilities {
+  .text-display {
+    font-size: 2.25rem;
+    line-height: 2.5rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+  .text-page-title {
+    font-size: 1.5rem;
+    line-height: 2rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .text-section-title {
+    font-size: 1.0625rem;
+    line-height: 1.5rem;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+  }
+  .text-body {
+    font-size: 0.875rem;
+    line-height: 1.375rem;
+    font-weight: 400;
+  }
+  .text-body-small {
+    font-size: 0.8125rem;
+    line-height: 1.25rem;
+    font-weight: 400;
+  }
+  .text-label {
+    font-size: 0.75rem;
+    line-height: 1rem;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+  }
+  .text-caption {
+    font-size: 0.6875rem;
+    line-height: 1rem;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: var(--color-muted);
+  }
+  .text-metric-large {
+    font-size: 2rem;
+    line-height: 2.25rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+  }
+  .text-metric-small {
+    font-size: 1.125rem;
+    line-height: 1.5rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .font-mono-data {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+}
