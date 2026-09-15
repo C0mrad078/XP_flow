@@ -16,5 +16,12 @@ pub async fn create_workspace(
     state: State<'_, AppState>,
     name: String,
 ) -> Result<Workspace, AppError> {
-    Ok(state.workspace_service.create_workspace(name).await?)
+    let workspace = state.workspace_service.create_workspace(name).await?;
+    // Every workspace needs its implicit Manual Import source before the
+    // Content page's "Import Videos" / drag-and-drop can be used.
+    state
+        .source_service
+        .ensure_manual_import_source(workspace.id)
+        .await?;
+    Ok(workspace)
 }

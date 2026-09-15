@@ -4,7 +4,11 @@
 //! belongs in this module (Rules 1 and 2).
 
 pub mod activity_commands;
+pub mod content_commands;
+pub mod import_commands;
+pub mod media_protocol;
 pub mod notification_commands;
 pub mod settings_commands;
+pub mod source_commands;
 pub mod system_commands;
 pub mod workspace_commands;

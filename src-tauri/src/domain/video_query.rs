@@ -1,8 +1,10 @@
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::video_status::{AvailabilityStatus, Orientation, ValidationStatus, VideoPriority};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum VideoSort {
     NewestImported,
     OldestImported,
@@ -12,13 +14,15 @@ pub enum VideoSort {
     Channel,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ChannelFilter {
     Any(Uuid),
     Unassigned,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DuplicateFilter {
     PossibleDuplicates,
 }
