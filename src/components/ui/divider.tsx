@@ -11,9 +11,16 @@ export function Divider({ className, orientation = "horizontal", label, ...props
   if (label && orientation === "horizontal") {
     return (
       <div className="flex items-center gap-3">
-        <SeparatorPrimitive.Root orientation="horizontal" className={cn("h-px flex-1 bg-border", className)} {...props} />
+        <SeparatorPrimitive.Root
+          orientation="horizontal"
+          className={cn("h-px flex-1 bg-border", className)}
+          {...props}
+        />
         <span className="text-caption">{label}</span>
-        <SeparatorPrimitive.Root orientation="horizontal" className={cn("h-px flex-1 bg-border", className)} />
+        <SeparatorPrimitive.Root
+          orientation="horizontal"
+          className={cn("h-px flex-1 bg-border", className)}
+        />
       </div>
     );
   }

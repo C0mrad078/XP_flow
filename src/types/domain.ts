@@ -117,14 +117,7 @@ export interface AppInfo {
 
 /** Mirrors src-tauri/src/error.rs::ErrorCode. */
 export type ErrorCode =
-  | "VALIDATION"
-  | "DATABASE"
-  | "AUTHENTICATION"
-  | "NETWORK"
-  | "RATE_LIMIT"
-  | "MEDIA"
-  | "PLATFORM"
-  | "INTERNAL";
+  "VALIDATION" | "DATABASE" | "AUTHENTICATION" | "NETWORK" | "RATE_LIMIT" | "MEDIA" | "PLATFORM" | "INTERNAL";
 
 /** Mirrors src-tauri/src/error.rs::AppError. */
 export interface AppError {

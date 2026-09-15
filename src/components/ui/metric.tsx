@@ -17,7 +17,8 @@ export interface MetricProps {
 }
 
 export function Metric({ label, value, icon: Icon, trend, className }: MetricProps) {
-  const trendIsGood = trend && (trend.positiveIsGood ?? true ? trend.direction === "up" : trend.direction === "down");
+  const trendIsGood =
+    trend && ((trend.positiveIsGood ?? true) ? trend.direction === "up" : trend.direction === "down");
 
   return (
     <div className={cn("flex flex-col gap-2", className)}>
@@ -34,7 +35,11 @@ export function Metric({ label, value, icon: Icon, trend, className }: MetricPro
               trendIsGood ? "text-success" : "text-danger",
             )}
           >
-            {trend.direction === "up" ? <ArrowUpRight className="size-3.5" /> : <ArrowDownRight className="size-3.5" />}
+            {trend.direction === "up" ? (
+              <ArrowUpRight className="size-3.5" />
+            ) : (
+              <ArrowDownRight className="size-3.5" />
+            )}
             {trend.value}
           </span>
         )}

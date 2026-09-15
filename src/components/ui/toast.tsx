@@ -35,7 +35,9 @@ export function Toast({ toast: item, onDismiss }: ToastProps) {
       <Icon className={cn("mt-0.5 size-4 shrink-0", VARIANT_CLASSES[item.variant])} />
       <div className="min-w-0 flex-1">
         <p className="text-body-small font-medium text-foreground">{item.title}</p>
-        {item.description && <p className="text-caption normal-case tracking-normal text-muted-foreground">{item.description}</p>}
+        {item.description && (
+          <p className="text-caption normal-case tracking-normal text-muted-foreground">{item.description}</p>
+        )}
       </div>
       <button
         type="button"
