@@ -9,7 +9,7 @@ import { LoadingState } from "@/components/feedback/loading-state";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { useChannels, useCreateChannel } from "@/hooks/use-channels";
+import { useChannelOverview, useCreateChannel } from "@/hooks/use-channels";
 import { toast } from "@/stores/toast-store";
 import { isAppError } from "@/types/domain";
 
@@ -17,7 +17,7 @@ import { ChannelCard } from "./channel-card";
 import { ChannelScheduleDrawer } from "./channel-schedule-drawer";
 
 export function ChannelsPage() {
-  const { data: channels = [], isLoading, isError, refetch } = useChannels();
+  const { data: overviews = [], isLoading, isError, refetch } = useChannelOverview();
   const createChannel = useCreateChannel();
   const [addOpen, setAddOpen] = useState(false);
   const [name, setName] = useState("");
@@ -85,7 +85,7 @@ export function ChannelsPage() {
       {isLoading && <LoadingState label="Loading channels…" />}
       {isError && <ErrorState onRetry={() => refetch()} />}
 
-      {channels.length === 0 && !isLoading ? (
+      {overviews.length === 0 && !isLoading ? (
         <EmptyState
           icon={Radio}
           title="No channels connected"
@@ -93,15 +93,19 @@ export function ChannelsPage() {
         />
       ) : (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {channels.map((channel) => (
-            <ChannelCard key={channel.id} channel={channel} onOpenSchedule={setScheduleChannelId} />
+          {overviews.map((overview) => (
+            <ChannelCard
+              key={overview.channel.id}
+              overview={overview}
+              onOpenSchedule={setScheduleChannelId}
+            />
           ))}
         </div>
       )}
 
       <ChannelScheduleDrawer
         channelId={scheduleChannelId}
-        channelName={channels.find((c) => c.id === scheduleChannelId)?.name ?? ""}
+        channelName={overviews.find((o) => o.channel.id === scheduleChannelId)?.channel.name ?? ""}
         onClose={() => setScheduleChannelId(null)}
       />
     </PageContainer>

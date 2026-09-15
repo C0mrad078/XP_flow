@@ -7,7 +7,7 @@ Kwai**, whose provider-issued `client_secret`/`app_secret` cannot be
 shipped inside `XP FLOW.exe`/`XP FLOW.app` without effectively publishing
 it.
 
-## What this is *not*
+## What this is _not_
 
 This is **not** the XP FLOW backend, and it never becomes one. It has no
 concept of:

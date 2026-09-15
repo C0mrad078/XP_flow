@@ -4,38 +4,41 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
-import { PlatformBadge } from "@/components/ui/platform-badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useSetChannelStatus } from "@/hooks/use-channels";
-import { useCreatePlatformAccount, usePlatformAccounts } from "@/hooks/use-platform-accounts";
-import { useQueueList } from "@/hooks/use-queue";
-import { useScheduleSlots } from "@/hooks/use-schedule-slots";
+import { useConnectFlow } from "@/hooks/use-platform-auth";
 import { cn } from "@/lib/utilities/cn";
-import type { Channel } from "@/lib/tauri";
+import type { ChannelOverview } from "@/lib/tauri";
+import { useWorkspaceStore } from "@/stores/workspace-store";
 import { PLATFORMS, PLATFORM_LABELS, type Platform } from "@/types/domain";
 
+import { ConnectFlowDialog } from "@/features/integrations/connect-flow-dialog";
+import { PlatformAccountRow } from "@/features/integrations/platform-account-row";
+
 export interface ChannelCardProps {
-  channel: Channel;
+  overview: ChannelOverview;
   onOpenSchedule: (channelId: string) => void;
 }
 
-export function ChannelCard({ channel, onOpenSchedule }: ChannelCardProps) {
-  const { data: accounts = [] } = usePlatformAccounts(channel.id);
-  const { data: slots = [] } = useScheduleSlots(channel.id);
-  const { data: queuePage } = useQueueList({
-    channel_id: channel.id,
-    statuses: ["queued", "scheduled"],
-    page_size: 1,
-  });
+export function ChannelCard({ overview, onOpenSchedule }: ChannelCardProps) {
+  const {
+    channel,
+    platform_accounts: accounts,
+    queued_count: queuedCount,
+    active_slot_count: activeSlotsPerWeek,
+  } = overview;
+  const workspaceId = useWorkspaceStore((state) => state.workspace?.id);
   const setStatus = useSetChannelStatus();
-  const createPlatformAccount = useCreatePlatformAccount(channel.id);
-  const availablePlatforms = PLATFORMS.filter((p) => !accounts.some((a) => a.platform === p));
-
-  const activeSlotsPerWeek = slots.filter((s) => s.is_active).length;
-  const queuedCount = queuePage?.total ?? 0;
+  const connectFlow = useConnectFlow();
   const contentStockDays =
     activeSlotsPerWeek > 0 ? Math.floor(queuedCount / (activeSlotsPerWeek / 7)) : queuedCount > 0 ? null : 0;
   const isPaused = channel.status === "paused";
+  const connectingPlatform = connectFlow.state ? connectFlow.platform : null;
+
+  function handleConnect(platform: Platform) {
+    if (!workspaceId) return;
+    void connectFlow.connect(workspaceId, channel.id, platform);
+  }
 
   return (
     <Card>
@@ -67,25 +70,27 @@ export function ChannelCard({ channel, onOpenSchedule }: ChannelCardProps) {
       </CardHeader>
 
       <CardContent className="flex flex-col gap-4">
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-col gap-2">
           {accounts.map((account) => (
-            <PlatformBadge key={account.id} platform={account.platform} size="sm" />
+            <PlatformAccountRow
+              key={account.id}
+              account={account}
+              onReconnect={() => connectFlow.reconnect(account.id, account.platform)}
+            />
           ))}
-          {availablePlatforms.length > 0 && (
-            <Select value="" onValueChange={(value) => createPlatformAccount.mutate(value as Platform)}>
-              <SelectTrigger className="h-7 w-8 justify-center border-dashed p-0 [&>svg]:hidden">
-                <Plus className="size-3.5" />
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {availablePlatforms.map((p) => (
-                  <SelectItem key={p} value={p}>
-                    {PLATFORM_LABELS[p]}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          )}
+          <Select value="" onValueChange={(value) => handleConnect(value as Platform)}>
+            <SelectTrigger className="h-7 w-fit gap-1.5 border-dashed px-2 text-caption normal-case tracking-normal [&>svg:last-child]:hidden">
+              <Plus className="size-3.5" />
+              <SelectValue placeholder="Connect account" />
+            </SelectTrigger>
+            <SelectContent>
+              {PLATFORMS.map((p) => (
+                <SelectItem key={p} value={p}>
+                  {PLATFORM_LABELS[p]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
 
         <div className="grid grid-cols-2 gap-3 border-t border-border pt-3">
@@ -112,6 +117,15 @@ export function ChannelCard({ channel, onOpenSchedule }: ChannelCardProps) {
           </Badge>
         )}
       </CardContent>
+
+      {connectingPlatform && (
+        <ConnectFlowDialog
+          platform={connectingPlatform}
+          state={connectFlow.state}
+          onCancel={() => void connectFlow.cancel()}
+          onClose={() => connectFlow.reset()}
+        />
+      )}
     </Card>
   );
 }

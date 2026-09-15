@@ -44,20 +44,7 @@ export interface CalendarPublication {
   local_time: string;
 }
 
-export type ConnectionStatus = "not_connected" | "connected" | "auth_expired" | "error";
-
-export interface PlatformAccount {
-  id: UUID;
-  channel_id: UUID;
-  platform: Platform;
-  display_name: string | null;
-  status: ConnectionStatus;
-  external_account_id: string | null;
-  connected_at: ISODateTime | null;
-  default_target: boolean;
-  created_at: ISODateTime;
-  updated_at: ISODateTime;
-}
+export type { Capability, ConnectionHealth, PlatformAccount, PlatformAccountStatus } from "./platform-auth";
 
 export type QueueSort = "queue_order" | "priority_desc" | "newest_first" | "oldest_first";
 
