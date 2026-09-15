@@ -1,20 +1,27 @@
-//! SQLite implementations of the `domain::ports::repositories` traits.
-//! This is the only place in the codebase allowed to write SQL.
+//! SQLite implementations of the `domain::ports::repositories` (and
+//! `jobs::JobRepository`) traits. This is the only place in the codebase
+//! allowed to write SQL.
 
 mod sqlite_activity_repository;
 mod sqlite_channel_repository;
+mod sqlite_duplicate_match_repository;
+mod sqlite_job_repository;
 mod sqlite_notification_repository;
 mod sqlite_publication_repository;
 mod sqlite_settings_repository;
 mod sqlite_video_repository;
+mod sqlite_video_source_repository;
 mod sqlite_workspace_repository;
 
 pub use sqlite_activity_repository::SqliteActivityRepository;
 pub use sqlite_channel_repository::SqliteChannelRepository;
+pub use sqlite_duplicate_match_repository::SqliteDuplicateMatchRepository;
+pub use sqlite_job_repository::SqliteJobRepository;
 pub use sqlite_notification_repository::SqliteNotificationRepository;
 pub use sqlite_publication_repository::SqlitePublicationRepository;
 pub use sqlite_settings_repository::SqliteSettingsRepository;
 pub use sqlite_video_repository::SqliteVideoRepository;
+pub use sqlite_video_source_repository::SqliteVideoSourceRepository;
 pub use sqlite_workspace_repository::SqliteWorkspaceRepository;
 
 use chrono::{DateTime, Utc};

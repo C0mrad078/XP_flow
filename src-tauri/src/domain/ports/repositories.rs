@@ -4,10 +4,13 @@ use uuid::Uuid;
 use crate::domain::activity_event::ActivityEvent;
 use crate::domain::app_settings::AppSettings;
 use crate::domain::channel::Channel;
+use crate::domain::duplicate_match::DuplicateMatch;
 use crate::domain::errors::DomainResult;
 use crate::domain::notification::Notification;
 use crate::domain::publication::Publication;
 use crate::domain::video::Video;
+use crate::domain::video_query::{VideoLibrarySummary, VideoListQuery, VideoPage};
+use crate::domain::video_source::VideoSource;
 use crate::domain::workspace::Workspace;
 
 /// Repository contracts (ports) that the domain/application layers depend
@@ -34,7 +37,46 @@ pub trait ChannelRepository: Send + Sync {
 #[async_trait]
 pub trait VideoRepository: Send + Sync {
     async fn create(&self, video: &Video) -> DomainResult<()>;
+    async fn update(&self, video: &Video) -> DomainResult<()>;
+    async fn get(&self, id: Uuid) -> DomainResult<Option<Video>>;
+    async fn get_by_hash(
+        &self,
+        workspace_id: Uuid,
+        content_hash: &str,
+    ) -> DomainResult<Option<Video>>;
+    async fn get_by_path(&self, workspace_id: Uuid, file_path: &str)
+        -> DomainResult<Option<Video>>;
     async fn list_for_workspace(&self, workspace_id: Uuid) -> DomainResult<Vec<Video>>;
+    /// `(id, file_path)` for every non-archived video from one source —
+    /// used by reconciliation to diff a folder scan against what's
+    /// already indexed without loading full rows (section 16/17).
+    async fn list_paths_for_source(&self, source_id: Uuid) -> DomainResult<Vec<(Uuid, String)>>;
+    /// Recent perceptual hashes in the workspace, for near-duplicate
+    /// comparison (section 28) — bounded so this never becomes an
+    /// O(library size) scan on every import.
+    async fn list_recent_perceptual_hashes(
+        &self,
+        workspace_id: Uuid,
+        limit: i64,
+    ) -> DomainResult<Vec<(Uuid, String)>>;
+    async fn list_paginated(&self, query: &VideoListQuery) -> DomainResult<VideoPage>;
+    async fn summary(&self, workspace_id: Uuid) -> DomainResult<VideoLibrarySummary>;
+    async fn delete(&self, id: Uuid) -> DomainResult<()>;
+}
+
+#[async_trait]
+pub trait VideoSourceRepository: Send + Sync {
+    async fn create(&self, source: &VideoSource) -> DomainResult<()>;
+    async fn update(&self, source: &VideoSource) -> DomainResult<()>;
+    async fn get(&self, id: Uuid) -> DomainResult<Option<VideoSource>>;
+    async fn list_for_workspace(&self, workspace_id: Uuid) -> DomainResult<Vec<VideoSource>>;
+    async fn delete(&self, id: Uuid) -> DomainResult<()>;
+}
+
+#[async_trait]
+pub trait DuplicateMatchRepository: Send + Sync {
+    async fn create(&self, duplicate: &DuplicateMatch) -> DomainResult<()>;
+    async fn list_for_video(&self, video_id: Uuid) -> DomainResult<Vec<DuplicateMatch>>;
 }
 
 #[async_trait]

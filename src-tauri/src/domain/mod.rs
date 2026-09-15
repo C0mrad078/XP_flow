@@ -5,7 +5,9 @@
 pub mod activity_event;
 pub mod app_settings;
 pub mod channel;
+pub mod duplicate_match;
 pub mod errors;
+pub mod media_error;
 pub mod notification;
 pub mod platform;
 pub mod platform_account;
@@ -15,5 +17,7 @@ pub mod queue_item;
 pub mod schedule_slot;
 pub mod template;
 pub mod video;
+pub mod video_query;
 pub mod video_source;
+pub mod video_status;
 pub mod workspace;

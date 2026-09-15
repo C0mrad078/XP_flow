@@ -1,6 +1,7 @@
 use serde::Serialize;
 
 use crate::domain::errors::DomainError;
+use crate::domain::media_error::MediaError;
 use crate::domain::ports::platform_connector::PlatformConnectorError;
 use crate::domain::ports::secure_storage::SecureStorageError;
 
@@ -89,6 +90,19 @@ impl From<SecureStorageError> for AppError {
             "Secure storage is unavailable on this system.",
             err.to_string(),
         )
+    }
+}
+
+impl From<MediaError> for AppError {
+    fn from(err: MediaError) -> Self {
+        let code = match &err {
+            MediaError::FfprobeFailed { .. } | MediaError::ThumbnailFailed { .. } => {
+                ErrorCode::Media
+            }
+            MediaError::SourcePermissionDenied { .. } => ErrorCode::Validation,
+            _ => ErrorCode::Media,
+        };
+        AppError::new(code, err.user_message(), format!("[{}] {err}", err.code()))
     }
 }
 

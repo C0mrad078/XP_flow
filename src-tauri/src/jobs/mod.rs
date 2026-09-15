@@ -3,5 +3,7 @@
 //! `docs/architecture.md` for what's deferred to Phase 2.
 
 pub mod job;
+pub mod repository;
 
 pub use job::{Job, JobStatus, JobType};
+pub use repository::JobRepository;
