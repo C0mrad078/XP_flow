@@ -25,6 +25,10 @@ struct Flight {
     state: AuthFlowState,
 }
 
+/// How long a finished flight's terminal state stays pollable before its
+/// map entry is dropped (see the eviction comment in `start`).
+const FLIGHT_RETENTION: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Orchestrates the OAuth connect/reconnect/disconnect/validate/refresh
 /// lifecycle across all three providers (section 4's shared-abstraction-
 /// but-provider-specific-behavior split lives one layer down, in
@@ -196,6 +200,13 @@ impl PlatformAuthService {
                 }
             };
             set_state(&flights, session_id, final_state).await;
+            // The flight map has no other eviction path — without this, a
+            // long-running session leaks one entry per connect/reconnect
+            // attempt for as long as the app stays open. Give the poll
+            // loop (800ms interval, section 79) a wide margin to observe
+            // the terminal state at least once before dropping it.
+            tokio::time::sleep(FLIGHT_RETENTION).await;
+            flights.lock().await.remove(&session_id);
         });
 
         Ok(session_id)
@@ -389,17 +400,27 @@ async fn finish_connect(
     workspace_id: Uuid,
     channel_id: Uuid,
     platform: Platform,
-    existing_account_id: Option<Uuid>,
+    mut existing_account_id: Option<Uuid>,
     allow_identity_change: bool,
     identity: ConnectedIdentity,
 ) -> Result<PlatformAccount, AuthError> {
     // Section 53/59: the same real provider account must not end up
-    // connected under two different XP FLOW rows in this workspace.
+    // *connected* under two different XP FLOW rows in this workspace. A
+    // `Revoked` row isn't connected anywhere, though — it's disconnect's
+    // "never delete, so history survives" placeholder (see `disconnect`
+    // above) — so finding one here for a brand-new connect attempt means
+    // "revive this row," not "reject as a duplicate." Without this, a
+    // user who disconnects an account and then reconnects it via a fresh
+    // "Connect" click (rather than that specific row's "Reconnect"
+    // button) would hit a confusing identity-mismatch error against
+    // their own prior connection.
     if let Some(owner) = platform_account_repo
         .find_by_provider_identity(workspace_id, platform, &identity.provider_account_id)
         .await?
     {
-        if existing_account_id != Some(owner.id) {
+        if existing_account_id.is_none() && owner.status == PlatformAccountStatus::Revoked {
+            existing_account_id = Some(owner.id);
+        } else if existing_account_id != Some(owner.id) {
             return Err(AuthError::AccountIdentityMismatch {
                 previous_account_id: owner.provider_account_id.clone().unwrap_or_default(),
                 new_account_id: identity.provider_account_id.clone(),
@@ -456,6 +477,12 @@ async fn finish_connect(
         .clone()
         .or(account.username_or_handle);
     account.avatar_url = identity.avatar_url.clone().or(account.avatar_url);
+    // Reassigns even a revived row to whatever channel the user picked in
+    // this connect attempt — a plain "Reconnect" always targets the same
+    // channel it's already on anyway, but a revived-from-Revoked row (see
+    // above) must not silently stay pinned to whichever channel it was
+    // last connected under.
+    account.channel_id = channel_id;
     account.granted_scopes = identity.granted_scopes.clone();
     account.capabilities = map_scopes_to_capabilities(platform, &identity.granted_scopes);
     account.provider_connection_id = identity
@@ -765,6 +792,56 @@ mod tests {
         let state = wait_for_terminal_state(&service_b, session_b).await;
         assert!(
             matches!(state, AuthFlowState::Failed { code, .. } if code == "ACCOUNT_IDENTITY_MISMATCH")
+        );
+    }
+
+    #[tokio::test]
+    async fn reconnecting_the_same_real_account_after_disconnect_revives_the_row_on_the_new_channel(
+    ) {
+        let pool = temp_pool("auth-svc-revive").await;
+        let (workspace_id, _source_id) = seed_workspace_and_source(&pool).await;
+        let channel_a = seed_channel(&pool, workspace_id, "Channel A").await;
+        let channel_b = seed_channel(&pool, workspace_id, "Channel B").await;
+
+        let first_provider =
+            FakeAuthProvider::once(Platform::TikTok, Ok(sample_identity("tiktok-user-revived")));
+        let (service, repo) = build_service(pool.clone(), first_provider).await;
+        let session_id = service
+            .begin_connect(workspace_id, channel_a, Platform::TikTok)
+            .await
+            .unwrap();
+        assert!(matches!(
+            wait_for_terminal_state(&service, session_id).await,
+            AuthFlowState::Connected
+        ));
+        let original_id = repo.list_for_channel(channel_a).await.unwrap()[0].id;
+
+        service.disconnect(original_id).await.unwrap();
+
+        // A brand-new "Connect" (not that row's own "Reconnect") for the
+        // exact same real account, now targeting a different channel.
+        let second_provider =
+            FakeAuthProvider::once(Platform::TikTok, Ok(sample_identity("tiktok-user-revived")));
+        let (service_b, _repo) = build_service(pool, second_provider).await;
+        let session_b = service_b
+            .begin_connect(workspace_id, channel_b, Platform::TikTok)
+            .await
+            .unwrap();
+        let state = wait_for_terminal_state(&service_b, session_b).await;
+        assert!(matches!(state, AuthFlowState::Connected));
+
+        let accounts_b = repo.list_for_channel(channel_b).await.unwrap();
+        assert_eq!(
+            accounts_b.len(),
+            1,
+            "the revoked row should move here, not duplicate"
+        );
+        assert_eq!(accounts_b[0].id, original_id, "same row, revived in place");
+        assert_eq!(accounts_b[0].status, PlatformAccountStatus::Connected);
+
+        assert!(
+            repo.list_for_channel(channel_a).await.unwrap().is_empty(),
+            "the row no longer belongs to its original channel"
         );
     }
 

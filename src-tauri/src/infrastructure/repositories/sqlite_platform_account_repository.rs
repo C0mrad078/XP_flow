@@ -144,12 +144,13 @@ impl PlatformAccountRepository for SqlitePlatformAccountRepository {
 
     async fn update(&self, account: &PlatformAccount) -> DomainResult<()> {
         sqlx::query(
-            "UPDATE platform_accounts SET provider_account_id = ?, provider_connection_id = ?, display_name = ?, \
+            "UPDATE platform_accounts SET channel_id = ?, provider_account_id = ?, provider_connection_id = ?, display_name = ?, \
              username_or_handle = ?, avatar_url = ?, status = ?, granted_scopes_json = ?, capabilities_json = ?, \
              default_target = ?, access_expires_at = ?, refresh_expires_at = ?, connected_at = ?, \
              last_validated_at = ?, last_refreshed_at = ?, last_error_code = ?, last_error_message = ?, updated_at = ? \
              WHERE id = ?",
         )
+        .bind(account.channel_id.to_string())
         .bind(&account.provider_account_id)
         .bind(&account.provider_connection_id)
         .bind(&account.display_name)

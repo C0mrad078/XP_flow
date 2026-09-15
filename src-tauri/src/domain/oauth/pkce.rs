@@ -8,10 +8,24 @@ use sha2::{Digest, Sha256};
 /// only at token-exchange time; `challenge` is `BASE64URL(SHA256(verifier))`
 /// (no padding) sent at the *authorization* step, per S256 (section 6/section
 /// 11 of the Phase 4 brief).
-#[derive(Debug, Clone)]
+///
+/// `verifier` is credential-equivalent (combined with an observed
+/// authorization code, it's everything needed to complete the token
+/// exchange), so `Debug` is intentionally not derived with field values —
+/// same redaction discipline as `LocalCredential` (section 116).
+#[derive(Clone)]
 pub struct Pkce {
     pub verifier: String,
     pub challenge: String,
+}
+
+impl std::fmt::Debug for Pkce {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pkce")
+            .field("verifier", &"[redacted]")
+            .field("challenge", &self.challenge)
+            .finish()
+    }
 }
 
 /// Generates a fresh, cryptographically secure PKCE pair — never reused

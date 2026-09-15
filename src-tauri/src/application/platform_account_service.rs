@@ -122,3 +122,40 @@ impl PlatformAccountService {
         Ok(account)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infrastructure::repositories::SqlitePlatformAccountRepository;
+    use crate::test_support::*;
+
+    #[tokio::test]
+    async fn reassign_channel_persists_the_new_channel_id() {
+        let pool = temp_pool("platform-account-svc-reassign").await;
+        let (workspace_id, _source_id) = seed_workspace_and_source(&pool).await;
+        let channel_a = seed_channel(&pool, workspace_id, "Channel A").await;
+        let channel_b = seed_channel(&pool, workspace_id, "Channel B").await;
+        let repo = Arc::new(SqlitePlatformAccountRepository::new(pool));
+        let service =
+            PlatformAccountService::new(repo.clone() as Arc<dyn PlatformAccountRepository>);
+
+        let account = service
+            .create(workspace_id, channel_a, Platform::YouTube)
+            .await
+            .unwrap();
+
+        let reassigned = service
+            .reassign_channel(account.id, channel_b)
+            .await
+            .unwrap();
+        assert_eq!(reassigned.channel_id, channel_b);
+
+        // Round-trips through a fresh read, not just the in-memory struct
+        // `reassign_channel` returns — this is what caught the original
+        // bug, where the repository's UPDATE silently omitted channel_id.
+        let reloaded = service.get(account.id).await.unwrap();
+        assert_eq!(reloaded.channel_id, channel_b);
+        assert!(repo.list_for_channel(channel_a).await.unwrap().is_empty());
+        assert_eq!(repo.list_for_channel(channel_b).await.unwrap().len(), 1);
+    }
+}
