@@ -25,9 +25,18 @@ dist-ssr
 
 # Rust
 src-tauri/target
+services/auth-broker/target
 gen/
 
 # App runtime data (never commit local dev database/logs)
 *.sqlite
 *.sqlite-*
+*.db
+*.db-shm
+*.db-wal
+
+# Secrets (never commit real provider/broker credentials)
+.env
+.env.local
+services/auth-broker/.env
 

@@ -22,6 +22,7 @@ pub struct BrokerSessionStart {
 #[derive(Debug, Clone, Serialize)]
 pub struct ExchangeRequest<'a> {
     pub session_id: &'a str,
+    pub workspace_id: &'a str,
     pub code: &'a str,
     pub code_verifier: &'a str,
     pub redirect_uri: &'a str,

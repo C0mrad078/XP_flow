@@ -90,6 +90,7 @@ impl PlatformAuthProvider for TikTokAuthProvider {
                 "tiktok",
                 &ExchangeRequest {
                     session_id: &session.id.to_string(),
+                    workspace_id: &session.workspace_id.to_string(),
                     code: &code,
                     code_verifier: &session.pkce.verifier,
                     redirect_uri: &redirect_uri,
