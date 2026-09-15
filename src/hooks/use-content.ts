@@ -82,7 +82,8 @@ export function useUpdateVideo() {
 export function useBulkUpdateVideos() {
   const invalidate = useInvalidateContent();
   return useMutation({
-    mutationFn: ({ ids, input }: { ids: string[]; input: BulkUpdateInput }) => contentApi.bulkUpdate(ids, input),
+    mutationFn: ({ ids, input }: { ids: string[]; input: BulkUpdateInput }) =>
+      contentApi.bulkUpdate(ids, input),
     onSuccess: invalidate,
   });
 }

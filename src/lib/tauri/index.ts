@@ -1,5 +1,6 @@
 export { invoke } from "./client";
 export { activityApi } from "./activity";
+export { channelsApi } from "./channels";
 export { contentApi } from "./content";
 export { importApi } from "./import";
 export { notificationsApi } from "./notifications";
@@ -8,3 +9,4 @@ export { sourcesApi } from "./sources";
 export { systemApi } from "./system";
 export { workspaceApi } from "./workspace";
 export type { UpdateSettingsInput } from "./settings";
+export type { Channel } from "./channels";

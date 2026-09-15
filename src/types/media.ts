@@ -5,7 +5,8 @@
  */
 import type { ISODateTime, UUID } from "./domain";
 
-export type ValidationStatus = "pending" | "validating" | "valid" | "invalid" | "unsupported" | "corrupted" | "missing";
+export type ValidationStatus =
+  "pending" | "validating" | "valid" | "invalid" | "unsupported" | "corrupted" | "missing";
 
 export const VALIDATION_STATUS_LABELS: Record<ValidationStatus, string> = {
   pending: "Pending",
@@ -100,7 +101,8 @@ export interface VideoDetail extends Video {
   possible_duplicates: DuplicateMatch[];
 }
 
-export type VideoSort = "newest_imported" | "oldest_imported" | "filename" | "duration" | "file_size" | "channel";
+export type VideoSort =
+  "newest_imported" | "oldest_imported" | "filename" | "duration" | "file_size" | "channel";
 
 export interface ContentListRequest {
   search?: string;

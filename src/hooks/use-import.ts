@@ -25,8 +25,15 @@ export function useImportFolder() {
   const invalidate = useInvalidateAfterImport();
   const workspaceId = useWorkspaceStore((state) => state.workspace?.id);
   return useMutation({
-    mutationFn: ({ folderPath, recursive, channelId }: { folderPath: string; recursive: boolean; channelId?: string }) =>
-      importApi.folder(workspaceId!, folderPath, recursive, channelId),
+    mutationFn: ({
+      folderPath,
+      recursive,
+      channelId,
+    }: {
+      folderPath: string;
+      recursive: boolean;
+      channelId?: string;
+    }) => importApi.folder(workspaceId!, folderPath, recursive, channelId),
     onSuccess: invalidate,
   });
 }

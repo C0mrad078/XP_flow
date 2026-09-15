@@ -1,7 +1,13 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-import type { AvailabilityStatus, Orientation, ValidationStatus, VideoPriority, VideoSort } from "@/types/media";
+import type {
+  AvailabilityStatus,
+  Orientation,
+  ValidationStatus,
+  VideoPriority,
+  VideoSort,
+} from "@/types/media";
 
 export type ContentViewMode = "grid" | "list";
 
@@ -68,7 +74,9 @@ export const useContentStore = create<ContentState>()(
       selectedIds: [],
       toggleSelected: (id) =>
         set((state) => ({
-          selectedIds: state.selectedIds.includes(id) ? state.selectedIds.filter((x) => x !== id) : [...state.selectedIds, id],
+          selectedIds: state.selectedIds.includes(id)
+            ? state.selectedIds.filter((x) => x !== id)
+            : [...state.selectedIds, id],
         })),
       selectMany: (ids) => set({ selectedIds: ids }),
       clearSelection: () => set({ selectedIds: [] }),
