@@ -7,6 +7,7 @@ export interface QueueTimelineViewProps {
   channelNames: Map<UUID, string>;
   timezone: string;
   onSelect?: (publication: Publication) => void;
+  isAccountConnected?: (publication: Publication) => boolean;
 }
 
 const UNSCHEDULED_LABEL = "Unscheduled";
@@ -29,6 +30,7 @@ export function QueueTimelineView({
   channelNames,
   timezone,
   onSelect,
+  isAccountConnected,
 }: QueueTimelineViewProps) {
   const groups = new Map<string, Publication[]>();
   const unscheduled = publications.filter((p) => !p.scheduled_at);
@@ -63,6 +65,7 @@ export function QueueTimelineView({
                     channelName={channelNames.get(publication.channel_id) ?? "Unknown channel"}
                     timezone={timezone}
                     onClick={onSelect ? () => onSelect(publication) : undefined}
+                    accountConnected={isAccountConnected ? isAccountConnected(publication) : true}
                   />
                 </div>
               ))}

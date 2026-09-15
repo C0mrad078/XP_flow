@@ -6,9 +6,16 @@ export interface QueueListViewProps {
   channelNames: Map<UUID, string>;
   timezone: string;
   onSelect?: (publication: Publication) => void;
+  isAccountConnected?: (publication: Publication) => boolean;
 }
 
-export function QueueListView({ publications, channelNames, timezone, onSelect }: QueueListViewProps) {
+export function QueueListView({
+  publications,
+  channelNames,
+  timezone,
+  onSelect,
+  isAccountConnected,
+}: QueueListViewProps) {
   return (
     <div className="flex flex-col gap-2">
       {publications.map((publication) => (
@@ -19,6 +26,7 @@ export function QueueListView({ publications, channelNames, timezone, onSelect }
           timezone={timezone}
           dense
           onClick={onSelect ? () => onSelect(publication) : undefined}
+          accountConnected={isAccountConnected ? isAccountConnected(publication) : true}
         />
       ))}
     </div>

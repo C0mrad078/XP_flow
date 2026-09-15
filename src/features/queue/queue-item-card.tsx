@@ -1,9 +1,10 @@
-import { Lock } from "lucide-react";
+import { Lock, TriangleAlert } from "lucide-react";
 
 import { MediaThumbnail } from "@/components/common/media-thumbnail";
 import { Badge } from "@/components/ui/badge";
 import { PlatformBadge } from "@/components/ui/platform-badge";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatTimeInZone } from "@/lib/formatting/date";
 import { cn } from "@/lib/utilities/cn";
 import { VIDEO_PRIORITY_LABELS, type VideoPriority } from "@/types/media";
@@ -22,6 +23,10 @@ export interface QueueItemCardProps {
   timezone: string;
   dense?: boolean;
   onClick?: () => void;
+  /** Section 72-76: surfaced, never queue-cancelling — omit the prop (or
+   * pass `true`) when the target platform has no connected-account
+   * concept wired yet, so existing callers keep their current behavior. */
+  accountConnected?: boolean;
 }
 
 export function QueueItemCard({
@@ -30,6 +35,7 @@ export function QueueItemCard({
   timezone,
   dense = false,
   onClick,
+  accountConnected = true,
 }: QueueItemCardProps) {
   return (
     <button
@@ -54,6 +60,20 @@ export function QueueItemCard({
       </div>
 
       <div className="flex items-center gap-1.5">
+        {!accountConnected && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <TriangleAlert
+                className="size-3.5 text-warning"
+                aria-label="No connected account for this platform"
+              />
+            </TooltipTrigger>
+            <TooltipContent>
+              No connected {publication.platform} account for this channel — it can stay queued, but
+              publishing will be blocked until one is connected.
+            </TooltipContent>
+          </Tooltip>
+        )}
         <PlatformBadge platform={publication.platform} size="sm" iconOnly />
         <StatusBadge status={publication.status} className="px-1.5 py-0 text-[0.625rem]" />
       </div>

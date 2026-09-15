@@ -11,10 +11,12 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useChannels } from "@/hooks/use-channels";
+import { usePlatformAccountsForWorkspace } from "@/hooks/use-platform-accounts";
 import { useQueueList } from "@/hooks/use-queue";
 import { isFeatureEnabled } from "@/lib/utilities/feature-flags";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import type { Publication } from "@/types/domain";
+import { deriveConnectionHealth } from "@/types/platform-auth";
 
 import { PublicationDetailsDrawer } from "./publication-details-drawer";
 import { QueueListView } from "./queue-list-view";
@@ -37,6 +39,7 @@ export function QueuePage() {
   const timezone = useWorkspaceStore((state) => state.workspace?.timezone ?? "UTC");
 
   const { data: channels = [] } = useChannels();
+  const { data: platformAccounts = [] } = usePlatformAccountsForWorkspace();
   const {
     data: page,
     isLoading,
@@ -46,6 +49,18 @@ export function QueuePage() {
 
   const channelNames = new Map(channels.map((c) => [c.id, c.name]));
   const publications: Publication[] = page?.items ?? [];
+
+  /** Section 72-76: informational only — a missing/unhealthy account never
+   * removes or blocks a queued publication here, it only surfaces the
+   * problem on the row via `QueueItemCard`'s tooltip. */
+  function isAccountConnected(publication: Publication): boolean {
+    return platformAccounts.some((account) => {
+      if (account.channel_id !== publication.channel_id || account.platform !== publication.platform)
+        return false;
+      const health = deriveConnectionHealth(account);
+      return health === "healthy" || health === "token_expiring";
+    });
+  }
 
   return (
     <PageContainer>
@@ -136,6 +151,7 @@ export function QueuePage() {
             channelNames={channelNames}
             timezone={timezone}
             onSelect={(p) => setSelectedId(p.id)}
+            isAccountConnected={isAccountConnected}
           />
         ) : (
           <QueueListView
@@ -143,6 +159,7 @@ export function QueuePage() {
             channelNames={channelNames}
             timezone={timezone}
             onSelect={(p) => setSelectedId(p.id)}
+            isAccountConnected={isAccountConnected}
           />
         ))}
 

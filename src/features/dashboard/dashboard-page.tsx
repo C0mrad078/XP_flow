@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Metric } from "@/components/ui/metric";
 import { PlatformBadge } from "@/components/ui/platform-badge";
 import { activityApi } from "@/lib/tauri";
+import { PlatformHealthSummary } from "@/features/integrations/platform-health-summary";
 import { useChannels } from "@/hooks/use-channels";
 import { useQueueList } from "@/hooks/use-queue";
 import { formatCompactNumber, formatPercent } from "@/lib/formatting/number";
@@ -133,7 +134,7 @@ export function DashboardPage() {
         </Card>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <Card>
           <CardHeader>
             <CardTitle>Next publications</CardTitle>
@@ -178,6 +179,8 @@ export function DashboardPage() {
             ))}
           </CardContent>
         </Card>
+
+        <PlatformHealthSummary />
       </div>
     </PageContainer>
   );
