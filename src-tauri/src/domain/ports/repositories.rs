@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::domain::activity_event::ActivityEvent;
@@ -7,7 +8,13 @@ use crate::domain::channel::Channel;
 use crate::domain::duplicate_match::DuplicateMatch;
 use crate::domain::errors::DomainResult;
 use crate::domain::notification::Notification;
+use crate::domain::platform::Platform;
+use crate::domain::platform_account::PlatformAccount;
 use crate::domain::publication::Publication;
+use crate::domain::publication_query::{PublicationListQuery, PublicationPage};
+use crate::domain::queue_item::QueueItem;
+use crate::domain::schedule_exception::ScheduleException;
+use crate::domain::schedule_slot::ScheduleSlot;
 use crate::domain::video::Video;
 use crate::domain::video_query::{VideoLibrarySummary, VideoListQuery, VideoPage};
 use crate::domain::video_source::VideoSource;
@@ -21,6 +28,7 @@ use crate::domain::workspace::Workspace;
 #[async_trait]
 pub trait WorkspaceRepository: Send + Sync {
     async fn create(&self, workspace: &Workspace) -> DomainResult<()>;
+    async fn update(&self, workspace: &Workspace) -> DomainResult<()>;
     async fn get(&self, id: Uuid) -> DomainResult<Option<Workspace>>;
     async fn list(&self) -> DomainResult<Vec<Workspace>>;
     /// The workspace XP FLOW treats as "current" for Phase 1's
@@ -31,7 +39,25 @@ pub trait WorkspaceRepository: Send + Sync {
 #[async_trait]
 pub trait ChannelRepository: Send + Sync {
     async fn create(&self, channel: &Channel) -> DomainResult<()>;
+    async fn update(&self, channel: &Channel) -> DomainResult<()>;
+    async fn get(&self, id: Uuid) -> DomainResult<Option<Channel>>;
     async fn list_for_workspace(&self, workspace_id: Uuid) -> DomainResult<Vec<Channel>>;
+}
+
+#[async_trait]
+pub trait PlatformAccountRepository: Send + Sync {
+    async fn create(&self, account: &PlatformAccount) -> DomainResult<()>;
+    async fn update(&self, account: &PlatformAccount) -> DomainResult<()>;
+    async fn get(&self, id: Uuid) -> DomainResult<Option<PlatformAccount>>;
+    async fn list_for_channel(&self, channel_id: Uuid) -> DomainResult<Vec<PlatformAccount>>;
+    /// The account "Add to Queue" should default to for this channel and
+    /// platform (section 49) — the one flagged `default_target`, or the
+    /// channel's only account on that platform if there is exactly one.
+    async fn get_default_for_channel_platform(
+        &self,
+        channel_id: Uuid,
+        platform: Platform,
+    ) -> DomainResult<Option<PlatformAccount>>;
 }
 
 #[async_trait]
@@ -84,7 +110,85 @@ pub trait DuplicateMatchRepository: Send + Sync {
 pub trait PublicationRepository: Send + Sync {
     async fn create(&self, publication: &Publication) -> DomainResult<()>;
     async fn update(&self, publication: &Publication) -> DomainResult<()>;
+    async fn get(&self, id: Uuid) -> DomainResult<Option<Publication>>;
     async fn list_for_video(&self, video_id: Uuid) -> DomainResult<Vec<Publication>>;
+    /// Any publication for this exact (video, channel, platform) triple
+    /// that is not yet in a terminal/cancelled state — used to enforce
+    /// "one active publication per video/channel/platform" at the
+    /// application layer (section 50/51), backstopped by a DB index.
+    async fn find_active_for_video_channel_platform(
+        &self,
+        video_id: Uuid,
+        channel_id: Uuid,
+        platform: Platform,
+    ) -> DomainResult<Option<Publication>>;
+    async fn list_paginated(&self, query: &PublicationListQuery) -> DomainResult<PublicationPage>;
+    /// Every `Scheduled` publication in `[from, to)` UTC, for a given
+    /// channel or the whole workspace when `channel_id` is `None` — backs
+    /// the Calendar (section 41-45) and slot-conflict checks.
+    async fn list_scheduled_in_range(
+        &self,
+        workspace_id: Uuid,
+        channel_id: Option<Uuid>,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> DomainResult<Vec<Publication>>;
+    /// `Scheduled` publications whose `scheduled_at` is at or before `now`
+    /// — the due-publication query Phase 5's real uploader will consume
+    /// (section 111), unused for actual publishing in Phase 3.
+    async fn list_due(&self, workspace_id: Uuid, now: DateTime<Utc>) -> DomainResult<Vec<Publication>>;
+    /// All unlocked, non-terminal, non-scheduled queue publications for a
+    /// channel — the candidate pool the auto-scheduler draws from.
+    async fn list_unscheduled_for_channel(
+        &self,
+        channel_id: Uuid,
+    ) -> DomainResult<Vec<Publication>>;
+}
+
+#[async_trait]
+pub trait QueueItemRepository: Send + Sync {
+    async fn create(&self, item: &QueueItem) -> DomainResult<()>;
+    async fn update(&self, item: &QueueItem) -> DomainResult<()>;
+    async fn delete(&self, id: Uuid) -> DomainResult<()>;
+    /// Removes the queue-membership row for a publication, if any — called
+    /// on cancel/archive since a `QueueItem` only exists while a
+    /// publication is under active manual-queue management.
+    async fn delete_for_publication(&self, publication_id: Uuid) -> DomainResult<()>;
+    async fn get_for_publication(&self, publication_id: Uuid) -> DomainResult<Option<QueueItem>>;
+    /// Unscheduled items only, ordered by `position` — scheduled
+    /// publications are ordered by `scheduled_at` instead and are read
+    /// through `PublicationRepository`.
+    async fn list_unscheduled_for_workspace(
+        &self,
+        workspace_id: Uuid,
+    ) -> DomainResult<Vec<QueueItem>>;
+    async fn next_position(&self, workspace_id: Uuid) -> DomainResult<i64>;
+}
+
+#[async_trait]
+pub trait ScheduleSlotRepository: Send + Sync {
+    async fn create(&self, slot: &ScheduleSlot) -> DomainResult<()>;
+    async fn update(&self, slot: &ScheduleSlot) -> DomainResult<()>;
+    async fn delete(&self, id: Uuid) -> DomainResult<()>;
+    async fn get(&self, id: Uuid) -> DomainResult<Option<ScheduleSlot>>;
+    async fn list_for_channel(&self, channel_id: Uuid) -> DomainResult<Vec<ScheduleSlot>>;
+}
+
+#[async_trait]
+pub trait ScheduleExceptionRepository: Send + Sync {
+    async fn create(&self, exception: &ScheduleException) -> DomainResult<()>;
+    async fn delete(&self, id: Uuid) -> DomainResult<()>;
+    async fn list_for_channel_in_range(
+        &self,
+        channel_id: Uuid,
+        from: chrono::NaiveDate,
+        to: chrono::NaiveDate,
+    ) -> DomainResult<Vec<ScheduleException>>;
+    async fn exists_for_channel_date(
+        &self,
+        channel_id: Uuid,
+        date: chrono::NaiveDate,
+    ) -> DomainResult<bool>;
 }
 
 #[async_trait]

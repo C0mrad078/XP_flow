@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 use super::errors::{DomainError, DomainResult};
 use super::platform::Platform;
+use super::video_status::VideoPriority;
 
 /// The lifecycle of a single [`Publication`].
 ///
@@ -137,6 +138,7 @@ impl std::str::FromStr for PublicationStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Publication {
     pub id: Uuid,
+    pub workspace_id: Uuid,
     pub video_id: Uuid,
     pub channel_id: Uuid,
     pub platform_account_id: Option<Uuid>,
@@ -145,6 +147,14 @@ pub struct Publication {
     pub title: String,
     pub description: Option<String>,
     pub hashtags: Vec<String>,
+    /// Operational priority for scheduling/ordering (section 12/13). Seeded
+    /// from the source video's priority at creation time, but independently
+    /// mutable afterwards — a publication may need to be bumped or lowered
+    /// without touching the underlying video.
+    pub priority: VideoPriority,
+    /// When true, the auto-scheduler and "Rebuild Schedule" must never move
+    /// `scheduled_at` for this publication (section 82/113).
+    pub locked: bool,
     pub scheduled_at: Option<DateTime<Utc>>,
     pub published_at: Option<DateTime<Utc>>,
     pub remote_id: Option<String>,
@@ -156,14 +166,17 @@ pub struct Publication {
 
 impl Publication {
     pub fn new(
+        workspace_id: Uuid,
         video_id: Uuid,
         channel_id: Uuid,
         platform: Platform,
         title: impl Into<String>,
+        priority: VideoPriority,
     ) -> Self {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
+            workspace_id,
             video_id,
             channel_id,
             platform_account_id: None,
@@ -172,6 +185,8 @@ impl Publication {
             title: title.into(),
             description: None,
             hashtags: Vec::new(),
+            priority,
+            locked: false,
             scheduled_at: None,
             published_at: None,
             remote_id: None,
@@ -180,6 +195,15 @@ impl Publication {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// Whether this publication is currently overdue: still `Scheduled` but
+    /// its `scheduled_at` has already passed. This is a *derived* label
+    /// (section 78/81) — never persisted, never mutated to `Failed` just
+    /// because Phase 3 has no real uploader yet.
+    pub fn is_overdue(&self, now: DateTime<Utc>) -> bool {
+        self.status == PublicationStatus::Scheduled
+            && self.scheduled_at.is_some_and(|at| at < now)
     }
 
     /// Attempts to move this publication to `next`, validating the
@@ -213,8 +237,10 @@ mod tests {
         Publication::new(
             Uuid::new_v4(),
             Uuid::new_v4(),
+            Uuid::new_v4(),
             Platform::YouTube,
             "Sample title",
+            VideoPriority::Normal,
         )
     }
 
@@ -303,6 +329,32 @@ mod tests {
             .unwrap();
         publication.transition(PublicationStatus::Queued).unwrap();
         assert_eq!(publication.status, PublicationStatus::Queued);
+    }
+
+    #[test]
+    fn overdue_is_derived_from_status_and_scheduled_at() {
+        let mut publication = sample_publication();
+        let now = Utc::now();
+
+        assert!(!publication.is_overdue(now), "not scheduled yet");
+
+        for next in [
+            PublicationStatus::Validating,
+            PublicationStatus::Ready,
+            PublicationStatus::Queued,
+        ] {
+            publication.transition(next).unwrap();
+        }
+        publication.scheduled_at = Some(now - chrono::Duration::hours(1));
+        publication.transition(PublicationStatus::Scheduled).unwrap();
+
+        assert!(publication.is_overdue(now), "past due and still scheduled");
+
+        publication.transition(PublicationStatus::Uploading).unwrap();
+        assert!(
+            !publication.is_overdue(now),
+            "no longer just Scheduled, so no longer counted as overdue"
+        );
     }
 
     #[test]

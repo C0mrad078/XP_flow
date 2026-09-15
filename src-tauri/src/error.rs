@@ -79,6 +79,44 @@ impl From<DomainError> for AppError {
                 "A local database error occurred. Please try again.",
                 err.to_string(),
             ),
+            DomainError::InvalidValue { .. } => {
+                AppError::new(ErrorCode::Validation, err.to_string(), err.to_string())
+            }
+            DomainError::PublicationAlreadyExists => AppError::new(
+                ErrorCode::Validation,
+                "This video is already queued or scheduled for this channel and platform.",
+                err.to_string(),
+            ),
+            DomainError::ScheduleConflict => AppError::new(
+                ErrorCode::Validation,
+                "That time is already taken by another scheduled publication.",
+                err.to_string(),
+            ),
+            DomainError::ChannelPaused { .. } => AppError::new(
+                ErrorCode::Validation,
+                "This channel is paused. Resume it before scheduling.",
+                err.to_string(),
+            ),
+            DomainError::ChannelHasNoSchedule { .. } => AppError::new(
+                ErrorCode::Validation,
+                "This channel has no active schedule slots configured.",
+                err.to_string(),
+            ),
+            DomainError::PublicationLocked { .. } => AppError::new(
+                ErrorCode::Validation,
+                "This publication is locked and won't be moved automatically.",
+                err.to_string(),
+            ),
+            DomainError::NoAvailableSlot => AppError::new(
+                ErrorCode::Validation,
+                "No available slot could be found in the search window.",
+                err.to_string(),
+            ),
+            DomainError::BulkScheduleFailed(_) => AppError::new(
+                ErrorCode::Internal,
+                "The bulk scheduling operation failed and was rolled back.",
+                err.to_string(),
+            ),
         }
     }
 }

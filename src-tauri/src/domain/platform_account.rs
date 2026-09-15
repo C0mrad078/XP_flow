@@ -54,6 +54,11 @@ pub struct PlatformAccount {
     pub status: ConnectionStatus,
     pub external_account_id: Option<String>,
     pub connected_at: Option<DateTime<Utc>>,
+    /// Whether "Add to Queue" should default to this account when the
+    /// channel has more than one account on the same platform (section 49).
+    /// Reuses this existing table instead of introducing a separate
+    /// `channel_platform_targets` concept (section 7).
+    pub default_target: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -69,6 +74,7 @@ impl PlatformAccount {
             status: ConnectionStatus::NotConnected,
             external_account_id: None,
             connected_at: None,
+            default_target: false,
             created_at: now,
             updated_at: now,
         }

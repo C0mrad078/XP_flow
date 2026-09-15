@@ -22,6 +22,8 @@ fn map_repo_err(err: sqlx::Error) -> DomainError {
     DomainError::Repository(err.to_string())
 }
 
+const SELECT_COLUMNS: &str = "id, name, timezone, created_at, updated_at";
+
 fn row_to_workspace(row: &sqlx::sqlite::SqliteRow) -> Result<Workspace, sqlx::Error> {
     let id: String = row.try_get("id")?;
     let created_at: String = row.try_get("created_at")?;
@@ -29,6 +31,7 @@ fn row_to_workspace(row: &sqlx::sqlite::SqliteRow) -> Result<Workspace, sqlx::Er
     Ok(Workspace {
         id: Uuid::parse_str(&id).unwrap_or_default(),
         name: row.try_get("name")?,
+        timezone: row.try_get("timezone")?,
         created_at: parse_dt(&created_at),
         updated_at: parse_dt(&updated_at),
     })
@@ -38,10 +41,11 @@ fn row_to_workspace(row: &sqlx::sqlite::SqliteRow) -> Result<Workspace, sqlx::Er
 impl WorkspaceRepository for SqliteWorkspaceRepository {
     async fn create(&self, workspace: &Workspace) -> DomainResult<()> {
         sqlx::query(
-            "INSERT INTO workspaces (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO workspaces (id, name, timezone, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(workspace.id.to_string())
         .bind(&workspace.name)
+        .bind(&workspace.timezone)
         .bind(workspace.created_at.to_rfc3339())
         .bind(workspace.updated_at.to_rfc3339())
         .execute(&self.pool)
@@ -50,22 +54,33 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
         Ok(())
     }
 
+    async fn update(&self, workspace: &Workspace) -> DomainResult<()> {
+        sqlx::query("UPDATE workspaces SET name = ?, timezone = ?, updated_at = ? WHERE id = ?")
+            .bind(&workspace.name)
+            .bind(&workspace.timezone)
+            .bind(workspace.updated_at.to_rfc3339())
+            .bind(workspace.id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(map_repo_err)?;
+        Ok(())
+    }
+
     async fn get(&self, id: Uuid) -> DomainResult<Option<Workspace>> {
-        let row =
-            sqlx::query("SELECT id, name, created_at, updated_at FROM workspaces WHERE id = ?")
-                .bind(id.to_string())
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(map_repo_err)?;
+        let row = sqlx::query(&format!("SELECT {SELECT_COLUMNS} FROM workspaces WHERE id = ?"))
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_repo_err)?;
 
         row.map(|r| row_to_workspace(&r).map_err(map_repo_err))
             .transpose()
     }
 
     async fn list(&self) -> DomainResult<Vec<Workspace>> {
-        let rows = sqlx::query(
-            "SELECT id, name, created_at, updated_at FROM workspaces ORDER BY created_at ASC",
-        )
+        let rows = sqlx::query(&format!(
+            "SELECT {SELECT_COLUMNS} FROM workspaces ORDER BY created_at ASC"
+        ))
         .fetch_all(&self.pool)
         .await
         .map_err(map_repo_err)?;
@@ -76,9 +91,9 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
     }
 
     async fn get_current(&self) -> DomainResult<Option<Workspace>> {
-        let row = sqlx::query(
-            "SELECT id, name, created_at, updated_at FROM workspaces ORDER BY created_at DESC LIMIT 1",
-        )
+        let row = sqlx::query(&format!(
+            "SELECT {SELECT_COLUMNS} FROM workspaces ORDER BY created_at DESC LIMIT 1"
+        ))
         .fetch_optional(&self.pool)
         .await
         .map_err(map_repo_err)?;

@@ -53,4 +53,24 @@ impl WorkspaceService {
 
         Ok(workspace)
     }
+
+    /// Updates the workspace's IANA timezone (section 19). Rejects unknown
+    /// zone identifiers up front rather than letting bad data corrupt
+    /// scheduling math later.
+    pub async fn update_timezone(&self, workspace_id: uuid::Uuid, timezone: String) -> DomainResult<Workspace> {
+        Workspace::validate_timezone(&timezone)?;
+
+        let mut workspace = self
+            .workspace_repo
+            .get(workspace_id)
+            .await?
+            .ok_or_else(|| DomainError::NotFound {
+                entity: "Workspace",
+                id: workspace_id.to_string(),
+            })?;
+        workspace.timezone = timezone;
+        workspace.updated_at = chrono::Utc::now();
+        self.workspace_repo.update(&workspace).await?;
+        Ok(workspace)
+    }
 }

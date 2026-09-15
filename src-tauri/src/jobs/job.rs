@@ -21,6 +21,20 @@ pub enum JobType {
     ScanFolder,
     IngestVideo,
     ReconcileSource,
+    /// Auto-places one publication into its channel's next available slot
+    /// (section 22/25).
+    AutoSchedule,
+    /// Recomputes `scheduled_at` for every unlocked scheduled/queued
+    /// publication on a channel, e.g. after its schedule slots changed
+    /// (section 30/82 "Rebuild Schedule").
+    RebuildSchedule,
+    /// Walks a channel's near-term calendar looking for empty slots and
+    /// auto-fills them from the unscheduled queue, priority-first
+    /// (section 26 "Fill Empty Slots").
+    FillScheduleGaps,
+    /// Startup/periodic consistency sweep: detects orphaned queue items,
+    /// stale locks and other queue/schedule drift (section 91/113).
+    QueueReconciliation,
 }
 
 impl JobType {
@@ -36,6 +50,10 @@ impl JobType {
             JobType::ScanFolder => "scan_folder",
             JobType::IngestVideo => "ingest_video",
             JobType::ReconcileSource => "reconcile_source",
+            JobType::AutoSchedule => "auto_schedule",
+            JobType::RebuildSchedule => "rebuild_schedule",
+            JobType::FillScheduleGaps => "fill_schedule_gaps",
+            JobType::QueueReconciliation => "queue_reconciliation",
         }
     }
 }
@@ -55,6 +73,10 @@ impl std::str::FromStr for JobType {
             "scan_folder" => JobType::ScanFolder,
             "ingest_video" => JobType::IngestVideo,
             "reconcile_source" => JobType::ReconcileSource,
+            "auto_schedule" => JobType::AutoSchedule,
+            "rebuild_schedule" => JobType::RebuildSchedule,
+            "fill_schedule_gaps" => JobType::FillScheduleGaps,
+            "queue_reconciliation" => JobType::QueueReconciliation,
             other => return Err(format!("unknown job type: {other}")),
         })
     }
