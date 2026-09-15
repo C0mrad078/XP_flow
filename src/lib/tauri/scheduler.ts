@@ -6,6 +6,8 @@ export const schedulerApi = {
   scheduleAt: (publicationId: UUID, at: ISODateTime) =>
     invoke<Publication>("schedule_publication", { publicationId, at }),
   unschedule: (publicationId: UUID) => invoke<Publication>("unschedule_publication", { publicationId }),
+  rescheduleToDate: (publicationId: UUID, newDate: string) =>
+    invoke<Publication>("reschedule_publication_to_date", { publicationId, newDate }),
   autoSchedule: (publicationId: UUID) => invoke<Publication>("auto_schedule_publication", { publicationId }),
   autoScheduleChannel: (channelId: UUID, horizonDays?: number) =>
     invoke<BulkScheduleResult>("auto_schedule_channel", { channelId, horizonDays: horizonDays ?? null }),
