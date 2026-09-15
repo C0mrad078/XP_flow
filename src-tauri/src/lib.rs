@@ -126,6 +126,7 @@ pub fn run() {
             commands::publication_commands::reorder_queue,
             commands::scheduler_commands::schedule_publication,
             commands::scheduler_commands::unschedule_publication,
+            commands::scheduler_commands::reschedule_publication_to_date,
             commands::scheduler_commands::auto_schedule_publication,
             commands::scheduler_commands::auto_schedule_channel,
             commands::scheduler_commands::fill_schedule_gaps,

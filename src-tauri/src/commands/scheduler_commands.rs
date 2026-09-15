@@ -45,6 +45,18 @@ pub async fn unschedule_publication(
 }
 
 #[tauri::command]
+pub async fn reschedule_publication_to_date(
+    state: State<'_, AppState>,
+    publication_id: Uuid,
+    new_date: NaiveDate,
+) -> Result<Publication, AppError> {
+    Ok(state
+        .scheduler_service
+        .reschedule_to_date(publication_id, new_date)
+        .await?)
+}
+
+#[tauri::command]
 pub async fn auto_schedule_publication(
     state: State<'_, AppState>,
     publication_id: Uuid,

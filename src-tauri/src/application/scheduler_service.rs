@@ -106,6 +106,49 @@ impl SchedulerService {
         Ok(publication)
     }
 
+    /// Moves an already-`Scheduled` publication to a different calendar
+    /// date, keeping its local time-of-day unchanged (section 42's
+    /// calendar drag-and-drop between days). Rejects locked publications
+    /// outright (section 82/113 — drag must respect locks, not just the
+    /// auto-scheduler) and reuses `schedule_at`'s own conflict/paused-
+    /// channel validation for the destination instant.
+    pub async fn reschedule_to_date(
+        &self,
+        publication_id: Uuid,
+        new_date: NaiveDate,
+    ) -> DomainResult<Publication> {
+        let publication = self.load_publication(publication_id).await?;
+        if publication.locked {
+            return Err(DomainError::PublicationLocked {
+                publication_id: publication.id.to_string(),
+            });
+        }
+        let current_at =
+            publication
+                .scheduled_at
+                .ok_or_else(|| DomainError::InvalidTransition {
+                    entity: "Publication",
+                    from: publication.status.to_string(),
+                    to: "scheduled".to_string(),
+                })?;
+
+        let workspace = self.load_workspace(publication.workspace_id).await?;
+        let tz: chrono_tz::Tz =
+            workspace
+                .timezone
+                .parse()
+                .map_err(|_| DomainError::InvalidValue {
+                    field: "timezone",
+                    reason: format!("{:?} is not a recognized IANA timezone", workspace.timezone),
+                })?;
+
+        let local_time = current_at.with_timezone(&tz).time();
+        let new_local = new_date.and_time(local_time);
+        let new_at = resolve_local_datetime_to_utc(tz, new_local);
+
+        self.schedule_at(publication_id, new_at).await
+    }
+
     /// Auto-places one `Queued`, unlocked publication into its channel's
     /// next available slot (section 22/25).
     pub async fn auto_schedule(&self, publication_id: Uuid) -> DomainResult<Publication> {
@@ -473,14 +516,14 @@ pub struct BulkScheduleResult {
     pub skipped: Vec<Uuid>,
 }
 
-fn local_midnight_utc(tz: chrono_tz::Tz, date: NaiveDate) -> DateTime<Utc> {
-    let naive = date.and_hms_opt(0, 0, 0).unwrap();
+/// Resolves a local wall-clock instant in `tz` to UTC, DST-safe: an
+/// ambiguous "fall back" instant resolves to the earlier occurrence; an
+/// instant that falls in a "spring forward" gap and therefore doesn't
+/// exist falls forward by one hour rather than erroring the caller.
+fn resolve_local_datetime_to_utc(tz: chrono_tz::Tz, naive: chrono::NaiveDateTime) -> DateTime<Utc> {
     match tz.from_local_datetime(&naive) {
         chrono::LocalResult::Single(dt) => dt.with_timezone(&Utc),
         chrono::LocalResult::Ambiguous(earliest, _) => earliest.with_timezone(&Utc),
-        // A local midnight that doesn't exist (rare DST edge case) — fall
-        // forward to the next valid instant rather than erroring the
-        // whole calendar view.
         chrono::LocalResult::None => tz
             .from_local_datetime(&(naive + Duration::hours(1)))
             .single()
@@ -489,8 +532,14 @@ fn local_midnight_utc(tz: chrono_tz::Tz, date: NaiveDate) -> DateTime<Utc> {
     }
 }
 
+fn local_midnight_utc(tz: chrono_tz::Tz, date: NaiveDate) -> DateTime<Utc> {
+    resolve_local_datetime_to_utc(tz, date.and_hms_opt(0, 0, 0).unwrap())
+}
+
 #[cfg(test)]
 mod tests {
+    use chrono::Timelike;
+
     use super::*;
     use crate::application::activity_service::ActivityService;
     use crate::application::publication_service::PublicationService;
@@ -877,5 +926,92 @@ mod tests {
             NaiveDate::from_ymd_opt(2024, 6, 15).unwrap()
         );
         assert_eq!(items[0].local_time, "10:00");
+    }
+
+    #[tokio::test]
+    async fn reschedule_to_date_keeps_the_same_local_time_of_day() {
+        let pool = temp_pool("sched-svc-drag").await;
+        let (workspace_id, source_id) = seed_workspace_and_source(&pool).await;
+        set_workspace_timezone(&pool, workspace_id, "America/New_York").await;
+        let channel_id = seed_channel(&pool, workspace_id, "Main").await;
+        let video_id = seed_video(&pool, workspace_id, source_id, None, "Clip").await;
+        let harness = build_harness(pool).await;
+
+        let publication = harness
+            .publications
+            .add_to_queue(
+                workspace_id,
+                video_id,
+                channel_id,
+                Platform::YouTube,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        // 14:00Z = 10:00 America/New_York (EDT).
+        let at = Utc.with_ymd_and_hms(2024, 6, 15, 14, 0, 0).unwrap();
+        harness
+            .scheduler
+            .schedule_at(publication.id, at)
+            .await
+            .unwrap();
+
+        let moved = harness
+            .scheduler
+            .reschedule_to_date(
+                publication.id,
+                NaiveDate::from_ymd_opt(2024, 6, 20).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let local = moved
+            .scheduled_at
+            .unwrap()
+            .with_timezone(&chrono_tz::America::New_York);
+        assert_eq!(
+            local.date_naive(),
+            NaiveDate::from_ymd_opt(2024, 6, 20).unwrap()
+        );
+        assert_eq!((local.hour(), local.minute()), (10, 0));
+    }
+
+    #[tokio::test]
+    async fn reschedule_to_date_rejects_a_locked_publication() {
+        let pool = temp_pool("sched-svc-drag-locked").await;
+        let (workspace_id, source_id) = seed_workspace_and_source(&pool).await;
+        let channel_id = seed_channel(&pool, workspace_id, "Main").await;
+        let video_id = seed_video(&pool, workspace_id, source_id, None, "Clip").await;
+        let harness = build_harness(pool.clone()).await;
+
+        let publication = harness
+            .publications
+            .add_to_queue(
+                workspace_id,
+                video_id,
+                channel_id,
+                Platform::YouTube,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        harness
+            .scheduler
+            .schedule_at(publication.id, Utc::now() + Duration::days(1))
+            .await
+            .unwrap();
+
+        let publication_repo = SqlitePublicationRepository::new(pool);
+        let mut locked = publication_repo.get(publication.id).await.unwrap().unwrap();
+        locked.locked = true;
+        publication_repo.update(&locked).await.unwrap();
+
+        let result = harness
+            .scheduler
+            .reschedule_to_date(publication.id, Utc::now().date_naive() + Duration::days(5))
+            .await;
+        assert!(matches!(result, Err(DomainError::PublicationLocked { .. })));
     }
 }
