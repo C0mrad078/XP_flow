@@ -1,18 +1,25 @@
-import { Pause, Play } from "lucide-react";
+import { CalendarClock, Pause, Play, Plus } from "lucide-react";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { PlatformBadge } from "@/components/ui/platform-badge";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useSetChannelStatus } from "@/hooks/use-channels";
-import { usePlatformAccounts } from "@/hooks/use-platform-accounts";
+import { useCreatePlatformAccount, usePlatformAccounts } from "@/hooks/use-platform-accounts";
 import { useQueueList } from "@/hooks/use-queue";
 import { useScheduleSlots } from "@/hooks/use-schedule-slots";
 import { cn } from "@/lib/utilities/cn";
 import type { Channel } from "@/lib/tauri";
+import { PLATFORMS, PLATFORM_LABELS, type Platform } from "@/types/domain";
 
-export function ChannelCard({ channel }: { channel: Channel }) {
+export interface ChannelCardProps {
+  channel: Channel;
+  onOpenSchedule: (channelId: string) => void;
+}
+
+export function ChannelCard({ channel, onOpenSchedule }: ChannelCardProps) {
   const { data: accounts = [] } = usePlatformAccounts(channel.id);
   const { data: slots = [] } = useScheduleSlots(channel.id);
   const { data: queuePage } = useQueueList({
@@ -21,6 +28,8 @@ export function ChannelCard({ channel }: { channel: Channel }) {
     page_size: 1,
   });
   const setStatus = useSetChannelStatus();
+  const createPlatformAccount = useCreatePlatformAccount(channel.id);
+  const availablePlatforms = PLATFORMS.filter((p) => !accounts.some((a) => a.platform === p));
 
   const activeSlotsPerWeek = slots.filter((s) => s.is_active).length;
   const queuedCount = queuePage?.total ?? 0;
@@ -40,25 +49,42 @@ export function ChannelCard({ channel }: { channel: Channel }) {
             <p className="text-body-small text-muted-foreground">{channel.niche ?? "No niche set"}</p>
           </div>
         </div>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => setStatus.mutate({ id: channel.id, status: isPaused ? "active" : "paused" })}
-          disabled={setStatus.isPending}
-        >
-          {isPaused ? <Play className="size-3.5" /> : <Pause className="size-3.5" />}
-          {isPaused ? "Paused" : "Active"}
-        </Button>
+        <div className="flex items-center gap-1">
+          <Button variant="ghost" size="sm" onClick={() => onOpenSchedule(channel.id)}>
+            <CalendarClock className="size-3.5" />
+            Schedule
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setStatus.mutate({ id: channel.id, status: isPaused ? "active" : "paused" })}
+            disabled={setStatus.isPending}
+          >
+            {isPaused ? <Play className="size-3.5" /> : <Pause className="size-3.5" />}
+            {isPaused ? "Paused" : "Active"}
+          </Button>
+        </div>
       </CardHeader>
 
       <CardContent className="flex flex-col gap-4">
-        <div className="flex flex-wrap gap-2">
-          {accounts.length === 0 ? (
-            <p className="text-caption normal-case tracking-normal">No platform targets configured yet</p>
-          ) : (
-            accounts.map((account) => (
-              <PlatformBadge key={account.id} platform={account.platform} size="sm" />
-            ))
+        <div className="flex flex-wrap items-center gap-2">
+          {accounts.map((account) => (
+            <PlatformBadge key={account.id} platform={account.platform} size="sm" />
+          ))}
+          {availablePlatforms.length > 0 && (
+            <Select value="" onValueChange={(value) => createPlatformAccount.mutate(value as Platform)}>
+              <SelectTrigger className="h-7 w-8 justify-center border-dashed p-0 [&>svg]:hidden">
+                <Plus className="size-3.5" />
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {availablePlatforms.map((p) => (
+                  <SelectItem key={p} value={p}>
+                    {PLATFORM_LABELS[p]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           )}
         </div>
 

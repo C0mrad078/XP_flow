@@ -14,12 +14,14 @@ import { toast } from "@/stores/toast-store";
 import { isAppError } from "@/types/domain";
 
 import { ChannelCard } from "./channel-card";
+import { ChannelScheduleDrawer } from "./channel-schedule-drawer";
 
 export function ChannelsPage() {
   const { data: channels = [], isLoading, isError, refetch } = useChannels();
   const createChannel = useCreateChannel();
   const [addOpen, setAddOpen] = useState(false);
   const [name, setName] = useState("");
+  const [scheduleChannelId, setScheduleChannelId] = useState<string | null>(null);
 
   function handleSubmit() {
     const trimmed = name.trim();
@@ -92,10 +94,16 @@ export function ChannelsPage() {
       ) : (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
           {channels.map((channel) => (
-            <ChannelCard key={channel.id} channel={channel} />
+            <ChannelCard key={channel.id} channel={channel} onOpenSchedule={setScheduleChannelId} />
           ))}
         </div>
       )}
+
+      <ChannelScheduleDrawer
+        channelId={scheduleChannelId}
+        channelName={channels.find((c) => c.id === scheduleChannelId)?.name ?? ""}
+        onClose={() => setScheduleChannelId(null)}
+      />
     </PageContainer>
   );
 }
