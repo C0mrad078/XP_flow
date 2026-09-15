@@ -51,6 +51,7 @@ pub trait VideoRepository: Send + Sync {
     /// used by reconciliation to diff a folder scan against what's
     /// already indexed without loading full rows (section 16/17).
     async fn list_paths_for_source(&self, source_id: Uuid) -> DomainResult<Vec<(Uuid, String)>>;
+    async fn count_for_source(&self, source_id: Uuid) -> DomainResult<i64>;
     /// Recent perceptual hashes in the workspace, for near-duplicate
     /// comparison (section 28) — bounded so this never becomes an
     /// O(library size) scan on every import.

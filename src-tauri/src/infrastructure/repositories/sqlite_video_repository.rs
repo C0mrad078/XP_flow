@@ -261,6 +261,17 @@ impl VideoRepository for SqliteVideoRepository {
             .collect()
     }
 
+    async fn count_for_source(&self, source_id: Uuid) -> DomainResult<i64> {
+        let row = sqlx::query(
+            "SELECT COUNT(*) as count FROM videos WHERE source_id = ? AND archived = 0",
+        )
+        .bind(source_id.to_string())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_repo_err)?;
+        row.try_get("count").map_err(map_repo_err)
+    }
+
     async fn list_recent_perceptual_hashes(
         &self,
         workspace_id: Uuid,

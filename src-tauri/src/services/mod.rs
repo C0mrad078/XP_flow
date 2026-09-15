@@ -2,5 +2,6 @@
 //! layer but are not themselves use-case orchestration for a single
 //! aggregate (media toolchain detection, notification fan-out).
 
+pub mod job_runner;
 pub mod media_status_service;
 pub mod notification_service;
