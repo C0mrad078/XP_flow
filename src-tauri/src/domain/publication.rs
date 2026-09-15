@@ -1,0 +1,333 @@
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use super::errors::{DomainError, DomainResult};
+use super::platform::Platform;
+
+/// The lifecycle of a single [`Publication`].
+///
+/// A publication moves forward through the "happy path" states
+/// (`Imported -> Validating -> Ready -> Queued -> Scheduled -> Uploading ->
+/// Processing -> Published`) and can drop into an operational/failure state
+/// at almost any point. Transitions are validated centrally by
+/// [`Publication::transition`] so no code path can move a publication into
+/// an impossible state by mutating a raw string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicationStatus {
+    // Happy path
+    Imported,
+    Validating,
+    Ready,
+    Queued,
+    Scheduled,
+    Uploading,
+    Processing,
+    Published,
+
+    // Failure / operational states
+    Failed,
+    RetryWait,
+    AuthRequired,
+    RateLimited,
+    Blocked,
+    Paused,
+    Cancelled,
+    Archived,
+    Duplicate,
+}
+
+impl PublicationStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PublicationStatus::Imported => "imported",
+            PublicationStatus::Validating => "validating",
+            PublicationStatus::Ready => "ready",
+            PublicationStatus::Queued => "queued",
+            PublicationStatus::Scheduled => "scheduled",
+            PublicationStatus::Uploading => "uploading",
+            PublicationStatus::Processing => "processing",
+            PublicationStatus::Published => "published",
+            PublicationStatus::Failed => "failed",
+            PublicationStatus::RetryWait => "retry_wait",
+            PublicationStatus::AuthRequired => "auth_required",
+            PublicationStatus::RateLimited => "rate_limited",
+            PublicationStatus::Blocked => "blocked",
+            PublicationStatus::Paused => "paused",
+            PublicationStatus::Cancelled => "cancelled",
+            PublicationStatus::Archived => "archived",
+            PublicationStatus::Duplicate => "duplicate",
+        }
+    }
+
+    /// Terminal states never have an outgoing transition, `Archived` most of
+    /// all — it is the deliberate "nothing more will ever happen" end state.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, PublicationStatus::Archived)
+    }
+
+    /// The set of states this status is allowed to move to directly.
+    pub fn allowed_next(&self) -> &'static [PublicationStatus] {
+        use PublicationStatus::*;
+        match self {
+            Imported => &[Validating, Cancelled, Duplicate],
+            Validating => &[Ready, Failed, Duplicate],
+            Ready => &[Queued, Cancelled, Archived],
+            Queued => &[Scheduled, Paused, Cancelled],
+            Scheduled => &[Uploading, Queued, Paused, Cancelled],
+            Uploading => &[Processing, Failed, AuthRequired, RateLimited, Blocked],
+            Processing => &[Published, Failed],
+            Published => &[Archived],
+            Failed => &[RetryWait, Cancelled, Archived],
+            RetryWait => &[Queued, Uploading, Cancelled],
+            AuthRequired => &[Queued, Cancelled],
+            RateLimited => &[RetryWait, Cancelled],
+            Blocked => &[Cancelled, Archived],
+            Paused => &[Queued, Scheduled, Cancelled],
+            Cancelled => &[Archived],
+            Archived => &[],
+            Duplicate => &[Archived, Cancelled],
+        }
+    }
+
+    pub fn can_transition_to(&self, next: PublicationStatus) -> bool {
+        self.allowed_next().contains(&next)
+    }
+}
+
+impl std::fmt::Display for PublicationStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for PublicationStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        use PublicationStatus::*;
+        Ok(match s {
+            "imported" => Imported,
+            "validating" => Validating,
+            "ready" => Ready,
+            "queued" => Queued,
+            "scheduled" => Scheduled,
+            "uploading" => Uploading,
+            "processing" => Processing,
+            "published" => Published,
+            "failed" => Failed,
+            "retry_wait" => RetryWait,
+            "auth_required" => AuthRequired,
+            "rate_limited" => RateLimited,
+            "blocked" => Blocked,
+            "paused" => Paused,
+            "cancelled" => Cancelled,
+            "archived" => Archived,
+            "duplicate" => Duplicate,
+            other => return Err(format!("unknown publication status: {other}")),
+        })
+    }
+}
+
+/// A single platform-specific publication of a [`super::video::Video`].
+///
+/// A video may fan out into several publications — one per platform — and
+/// each tracks its own title/description/schedule/status independently.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Publication {
+    pub id: Uuid,
+    pub video_id: Uuid,
+    pub channel_id: Uuid,
+    pub platform_account_id: Option<Uuid>,
+    pub platform: Platform,
+    pub status: PublicationStatus,
+    pub title: String,
+    pub description: Option<String>,
+    pub hashtags: Vec<String>,
+    pub scheduled_at: Option<DateTime<Utc>>,
+    pub published_at: Option<DateTime<Utc>>,
+    pub remote_id: Option<String>,
+    pub retry_count: i32,
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl Publication {
+    pub fn new(
+        video_id: Uuid,
+        channel_id: Uuid,
+        platform: Platform,
+        title: impl Into<String>,
+    ) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4(),
+            video_id,
+            channel_id,
+            platform_account_id: None,
+            platform,
+            status: PublicationStatus::Imported,
+            title: title.into(),
+            description: None,
+            hashtags: Vec::new(),
+            scheduled_at: None,
+            published_at: None,
+            remote_id: None,
+            retry_count: 0,
+            last_error: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// Attempts to move this publication to `next`, validating the
+    /// transition against [`PublicationStatus::allowed_next`]. Returns
+    /// [`DomainError::InvalidTransition`] rather than silently accepting an
+    /// impossible state change.
+    pub fn transition(&mut self, next: PublicationStatus) -> DomainResult<()> {
+        if !self.status.can_transition_to(next) {
+            return Err(DomainError::InvalidTransition {
+                entity: "Publication",
+                from: self.status.to_string(),
+                to: next.to_string(),
+            });
+        }
+
+        if next == PublicationStatus::Published {
+            self.published_at = Some(Utc::now());
+        }
+
+        self.status = next;
+        self.updated_at = Utc::now();
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_publication() -> Publication {
+        Publication::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Platform::YouTube,
+            "Sample title",
+        )
+    }
+
+    #[test]
+    fn new_publication_starts_imported() {
+        let publication = sample_publication();
+        assert_eq!(publication.status, PublicationStatus::Imported);
+    }
+
+    #[test]
+    fn happy_path_transitions_succeed() {
+        let mut publication = sample_publication();
+        let happy_path = [
+            PublicationStatus::Validating,
+            PublicationStatus::Ready,
+            PublicationStatus::Queued,
+            PublicationStatus::Scheduled,
+            PublicationStatus::Uploading,
+            PublicationStatus::Processing,
+            PublicationStatus::Published,
+            PublicationStatus::Archived,
+        ];
+
+        for next in happy_path {
+            publication
+                .transition(next)
+                .unwrap_or_else(|e| panic!("expected transition to {next:?} to succeed, got {e}"));
+        }
+
+        assert_eq!(publication.status, PublicationStatus::Archived);
+        assert!(publication.published_at.is_some());
+    }
+
+    #[test]
+    fn cannot_skip_states() {
+        let mut publication = sample_publication();
+        let err = publication
+            .transition(PublicationStatus::Published)
+            .expect_err("Imported -> Published must be rejected");
+
+        match err {
+            DomainError::InvalidTransition { from, to, .. } => {
+                assert_eq!(from, "imported");
+                assert_eq!(to, "published");
+            }
+            other => panic!("expected InvalidTransition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cannot_transition_out_of_archived() {
+        let mut publication = sample_publication();
+        for next in [
+            PublicationStatus::Validating,
+            PublicationStatus::Ready,
+            PublicationStatus::Queued,
+            PublicationStatus::Scheduled,
+            PublicationStatus::Uploading,
+            PublicationStatus::Processing,
+            PublicationStatus::Published,
+            PublicationStatus::Archived,
+        ] {
+            publication.transition(next).unwrap();
+        }
+
+        assert!(publication.status.is_terminal());
+        assert!(publication.transition(PublicationStatus::Queued).is_err());
+    }
+
+    #[test]
+    fn failure_and_retry_loop_is_valid() {
+        let mut publication = sample_publication();
+        for next in [
+            PublicationStatus::Validating,
+            PublicationStatus::Ready,
+            PublicationStatus::Queued,
+            PublicationStatus::Scheduled,
+            PublicationStatus::Uploading,
+        ] {
+            publication.transition(next).unwrap();
+        }
+
+        publication.transition(PublicationStatus::Failed).unwrap();
+        publication
+            .transition(PublicationStatus::RetryWait)
+            .unwrap();
+        publication.transition(PublicationStatus::Queued).unwrap();
+        assert_eq!(publication.status, PublicationStatus::Queued);
+    }
+
+    #[test]
+    fn status_round_trips_through_string() {
+        for status in [
+            PublicationStatus::Imported,
+            PublicationStatus::Validating,
+            PublicationStatus::Ready,
+            PublicationStatus::Queued,
+            PublicationStatus::Scheduled,
+            PublicationStatus::Uploading,
+            PublicationStatus::Processing,
+            PublicationStatus::Published,
+            PublicationStatus::Failed,
+            PublicationStatus::RetryWait,
+            PublicationStatus::AuthRequired,
+            PublicationStatus::RateLimited,
+            PublicationStatus::Blocked,
+            PublicationStatus::Paused,
+            PublicationStatus::Cancelled,
+            PublicationStatus::Archived,
+            PublicationStatus::Duplicate,
+        ] {
+            let parsed: PublicationStatus = status.as_str().parse().unwrap();
+            assert_eq!(parsed, status);
+        }
+    }
+}
