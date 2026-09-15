@@ -1,7 +1,10 @@
 export { invoke } from "./client";
 export { activityApi } from "./activity";
+export { contentApi } from "./content";
+export { importApi } from "./import";
 export { notificationsApi } from "./notifications";
 export { settingsApi } from "./settings";
+export { sourcesApi } from "./sources";
 export { systemApi } from "./system";
 export { workspaceApi } from "./workspace";
 export type { UpdateSettingsInput } from "./settings";

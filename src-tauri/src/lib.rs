@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use application::activity_service::ActivityService;
+use application::channel_service::ChannelService;
 use application::content_service::ContentService;
 use application::media_ingestion_service::MediaIngestionService;
 use application::settings_service::SettingsService;
@@ -22,15 +23,15 @@ use domain::activity_event::{ActivityCategory, ActivityLevel};
 use domain::ports::hashing::{ContentHashService, PerceptualHashService};
 use domain::ports::media_service::{MediaProbeService, MediaService, ThumbnailService};
 use domain::ports::repositories::{
-    ActivityRepository, DuplicateMatchRepository, NotificationRepository, SettingsRepository,
-    VideoRepository, VideoSourceRepository, WorkspaceRepository,
+    ActivityRepository, ChannelRepository, DuplicateMatchRepository, NotificationRepository,
+    SettingsRepository, VideoRepository, VideoSourceRepository, WorkspaceRepository,
 };
 use infrastructure::hashing::{DHashPerceptualHashService, Sha256ContentHashService};
 use infrastructure::media::{FfmpegMediaService, FfmpegThumbnailService, FfprobeMediaProbeService};
 use infrastructure::repositories::{
-    SqliteActivityRepository, SqliteDuplicateMatchRepository, SqliteJobRepository,
-    SqliteNotificationRepository, SqliteSettingsRepository, SqliteVideoRepository,
-    SqliteVideoSourceRepository, SqliteWorkspaceRepository,
+    SqliteActivityRepository, SqliteChannelRepository, SqliteDuplicateMatchRepository,
+    SqliteJobRepository, SqliteNotificationRepository, SqliteSettingsRepository,
+    SqliteVideoRepository, SqliteVideoSourceRepository, SqliteWorkspaceRepository,
 };
 use infrastructure::watcher::FolderWatcherService;
 use jobs::JobRepository;
@@ -97,6 +98,8 @@ pub fn run() {
             commands::source_commands::update_source,
             commands::source_commands::delete_source,
             commands::source_commands::scan_source_now,
+            commands::channel_commands::list_channels,
+            commands::channel_commands::create_channel,
             commands::import_commands::import_files,
             commands::import_commands::import_folder,
         ]);
@@ -140,6 +143,8 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
     let duplicate_repo: Arc<dyn DuplicateMatchRepository> =
         Arc::new(SqliteDuplicateMatchRepository::new(pool.clone()));
     let job_repo: Arc<dyn JobRepository> = Arc::new(SqliteJobRepository::new(pool.clone()));
+    let channel_repo: Arc<dyn ChannelRepository> =
+        Arc::new(SqliteChannelRepository::new(pool.clone()));
 
     let media_service: Arc<dyn MediaService> = Arc::new(FfmpegMediaService::new());
     let probe_service: Arc<dyn MediaProbeService> = Arc::new(FfprobeMediaProbeService::new());
@@ -158,6 +163,7 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         video_repo.clone(),
         activity_service.clone(),
     ));
+    let channel_service = Arc::new(ChannelService::new(channel_repo));
 
     let ingestion = Arc::new(MediaIngestionService::new(
         video_repo.clone(),
@@ -234,6 +240,7 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         notification_service,
         content_service,
         source_service,
+        channel_service,
         job_runner,
         video_repo,
         paths,

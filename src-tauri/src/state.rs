@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::application::activity_service::ActivityService;
+use crate::application::channel_service::ChannelService;
 use crate::application::content_service::ContentService;
 use crate::application::settings_service::SettingsService;
 use crate::application::source_service::SourceService;
@@ -29,6 +30,7 @@ pub struct AppState {
     pub notification_service: Arc<NotificationService>,
     pub content_service: Arc<ContentService>,
     pub source_service: Arc<SourceService>,
+    pub channel_service: Arc<ChannelService>,
     pub job_runner: Arc<JobRunner>,
     pub video_repo: Arc<dyn VideoRepository>,
     pub paths: AppPaths,

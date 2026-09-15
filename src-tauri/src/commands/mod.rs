@@ -4,6 +4,7 @@
 //! belongs in this module (Rules 1 and 2).
 
 pub mod activity_commands;
+pub mod channel_commands;
 pub mod content_commands;
 pub mod import_commands;
 pub mod media_protocol;
