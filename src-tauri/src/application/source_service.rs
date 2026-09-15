@@ -28,9 +28,14 @@ pub struct CreateSourceInput {
     pub watch_enabled: bool,
 }
 
+/// `channel_id` uses `serde_with`'s `double_option` — see the identical
+/// note on `content_service::UpdateVideoInput` — so an "Unassign channel"
+/// action in the UI (JSON `null`) is distinguishable from simply not
+/// touching the field.
 #[derive(Debug, Deserialize)]
 pub struct UpdateSourceInput {
     pub name: Option<String>,
+    #[serde(default, with = "::serde_with::rust::double_option")]
     pub channel_id: Option<Option<Uuid>>,
     pub enabled: Option<bool>,
     pub recursive: Option<bool>,

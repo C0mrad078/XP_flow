@@ -30,16 +30,27 @@ pub struct VideoDetail {
     pub possible_duplicates: Vec<DuplicateMatch>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+/// Every `Option<Option<T>>` field below uses `serde_with`'s
+/// `double_option` so the three JSON states the frontend actually needs
+/// are distinguishable: the key absent (`None`, "leave untouched"), the
+/// key present as `null` (`Some(None)`, "clear it"), and the key present
+/// with a value (`Some(Some(v))`, "set it"). Plain serde cannot tell
+/// "absent" from "null" for a nested `Option` — it collapses both to
+/// `None` — which would make it impossible to ever unassign a channel or
+/// clear notes through this endpoint.
+#[derive(Debug, Deserialize, Default, PartialEq)]
 pub struct UpdateVideoInput {
     pub display_title: Option<String>,
+    #[serde(default, with = "::serde_with::rust::double_option")]
     pub channel_id: Option<Option<Uuid>>,
     pub priority: Option<VideoPriority>,
+    #[serde(default, with = "::serde_with::rust::double_option")]
     pub notes: Option<Option<String>>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct BulkUpdateInput {
+    #[serde(default, with = "::serde_with::rust::double_option")]
     pub channel_id: Option<Option<Uuid>>,
     pub priority: Option<VideoPriority>,
     pub archived: Option<bool>,
@@ -224,5 +235,44 @@ impl ContentService {
             ));
         }
         Ok(video.file_path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_video_input_distinguishes_absent_null_and_a_value_for_channel_id() {
+        let untouched: UpdateVideoInput = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(
+            untouched.channel_id, None,
+            "omitted field must mean 'leave untouched'"
+        );
+
+        let cleared: UpdateVideoInput = serde_json::from_str(r#"{"channel_id": null}"#).unwrap();
+        assert_eq!(
+            cleared.channel_id,
+            Some(None),
+            "explicit null must mean 'unassign'"
+        );
+
+        let id = Uuid::new_v4();
+        let assigned: UpdateVideoInput =
+            serde_json::from_str(&format!(r#"{{"channel_id": "{id}"}}"#)).unwrap();
+        assert_eq!(assigned.channel_id, Some(Some(id)));
+    }
+
+    #[test]
+    fn update_video_input_distinguishes_absent_null_and_a_value_for_notes() {
+        let untouched: UpdateVideoInput = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(untouched.notes, None);
+
+        let cleared: UpdateVideoInput = serde_json::from_str(r#"{"notes": null}"#).unwrap();
+        assert_eq!(cleared.notes, Some(None));
+
+        let set: UpdateVideoInput =
+            serde_json::from_str(r#"{"notes": "shot on location"}"#).unwrap();
+        assert_eq!(set.notes, Some(Some("shot on location".to_string())));
     }
 }
