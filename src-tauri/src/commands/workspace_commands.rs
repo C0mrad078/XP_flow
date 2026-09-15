@@ -1,4 +1,5 @@
 use tauri::State;
+use uuid::Uuid;
 
 use crate::domain::workspace::Workspace;
 use crate::error::AppError;
@@ -24,4 +25,16 @@ pub async fn create_workspace(
         .ensure_manual_import_source(workspace.id)
         .await?;
     Ok(workspace)
+}
+
+#[tauri::command]
+pub async fn update_workspace_timezone(
+    state: State<'_, AppState>,
+    workspace_id: Uuid,
+    timezone: String,
+) -> Result<Workspace, AppError> {
+    Ok(state
+        .workspace_service
+        .update_timezone(workspace_id, timezone)
+        .await?)
 }
