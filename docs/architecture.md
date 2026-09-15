@@ -3,8 +3,9 @@
 This document explains how XP FLOW is put together and, more importantly, _why_ — the constraints each layer exists
 to enforce, so future phases extend this foundation instead of working around it.
 
-This covers Phase 1 (foundation/shell) and Phase 2 (media library). See `docs/media-library.md` for a deeper dive on
-the ingestion pipeline, folder watching, duplicate detection and caching specifically.
+This covers Phase 1 (foundation/shell), Phase 2 (media library) and Phase 3 (queue engine, scheduler, calendar,
+priority system). See `docs/media-library.md` for a deeper dive on the ingestion pipeline, folder watching, duplicate
+detection and caching, and `docs/scheduler.md` for a deeper dive on the queue/scheduler/calendar internals.
 
 ## 1. High-level shape
 
@@ -81,11 +82,12 @@ component.
 
 ### Why `development/mock-data` is separate
 
-Several Phase 1 screens (Queue, Content, Channels, Dashboard) are UI-complete but not wired to real backend
-persistence yet — the brief is explicit that Phase 1 should establish the visual/interaction language, not the real
-scheduler or platform sync. Every mock dataset lives under `src/development/mock-data/`, is typed independently of
-the real domain DTOs, and is imported only by the feature that needs it. Deleting the directory and wiring a real
-`VideoRepository`/`PublicationRepository`-backed hook in its place is a contained, mechanical change.
+A few screens remain intentionally mock-backed because their underlying feature (social analytics, comments sync,
+automation/AI) is explicitly out of scope through Phase 3 (`docs/scheduler.md` §"what's still a placeholder"). Every
+remaining mock dataset lives under `src/development/mock-data/`, is typed independently of the real domain DTOs, and
+is imported only by the feature that needs it — Queue, Content, Channels, Today and Dashboard's queue-derived tiles
+were all migrated off mock data in Phase 3 (`mock-data/queue.ts` and `mock-data/channels.ts` were deleted); Dashboard
+keeps mock view-count/performance widgets since real social analytics don't exist yet.
 
 ### Design tokens
 
@@ -103,7 +105,9 @@ src-tauri/src/
 │                        ThumbnailService, ContentHashService, PerceptualHashService
 ├── application/        Use-case orchestration that Tauri commands call directly: WorkspaceService, SettingsService,
 │                        ActivityService, ChannelService, SourceService, ContentService, MediaIngestionService (the
-│                        single ingestion pipeline every import path converges on — see docs/media-library.md §1)
+│                        single ingestion pipeline every import path converges on — see docs/media-library.md §1),
+│                        PublicationService (queue lifecycle), SchedulerService (scheduling/calendar),
+│                        ScheduleSlotService, PlatformAccountService — see docs/scheduler.md
 ├── services/           Cross-cutting technical services: MediaStatusService, NotificationService, JobRunner (the
 │                        concurrency/orchestration layer on top of MediaIngestionService — bounded-concurrency import,
 │                        folder-watcher dispatch, startup/periodic reconciliation — see docs/media-library.md §2-3)
@@ -118,7 +122,10 @@ src-tauri/src/
 ├── platform/            The only code allowed to know about the OS: data-directory resolution, OS keychain backend
 ├── persistence/          SQLite pool creation + migration bootstrap (sqlx::migrate!)
 ├── jobs/                 Job/JobType/JobStatus/JobRepository — persisted and executed for real by JobRunner as of
-│                        Phase 2 (ingestion/scan/reconcile job types); publishing job types remain unused placeholders
+│                        Phase 2 (ingestion/scan/reconcile job types); Phase 3 adds AutoSchedule/RebuildSchedule/
+│                        FillScheduleGaps/QueueReconciliation to the vocabulary (QueueReconciliation runs at startup;
+│                        the other three are reserved for a future async trigger — see docs/scheduler.md §7).
+│                        Publishing job types (PublishVideo/CollectMetrics/FetchComments) remain unused placeholders
 ├── commands/             Tauri IPC handlers — extract State<AppState>, call one application service method, map the
 │                        result — plus commands::media_protocol, a custom xpflowmedia:// URI scheme for local preview
 ├── state.rs              AppState: every application service + services, assembled once at startup
@@ -148,7 +155,10 @@ Queued → Scheduled → Uploading → Processing → Published`, plus `Failed`,
 of truth for legal transitions; `Publication::transition()` is the only way to change a publication's status, and it
 returns `DomainError::InvalidTransition` rather than allowing an impossible jump (e.g. `Imported → Published`
 directly). This is unit tested (`cargo test -p xp-flow domain::publication`) for the happy path, invalid skips,
-terminal-state enforcement, and the failure/retry loop.
+terminal-state enforcement, and the failure/retry loop. Phase 3 (`docs/scheduler.md`) drives this machine for real —
+`Ready → Queued` on "Add to Queue", `Queued → Scheduled` on manual/auto-schedule, `Scheduled → Queued` on unschedule —
+without adding a single new state; "Overdue" is deliberately a *derived* label
+(`Publication::is_overdue`/`isPublicationOverdue`), never a persisted status.
 
 ### Error architecture
 
@@ -214,6 +224,17 @@ meaning between phases — Phase 1's per-video provenance record became Phase 2'
 brief; every workspace gets an implicit `manual_import`-type source for file-dialog/drag-and-drop imports that aren't
 tied to a folder.
 
+`0003_content_hash_uniqueness.sql` adds the partial unique index closing a concurrent-ingestion duplicate race (see
+`docs/media-library.md` §7).
+
+`0004_queue_scheduler.sql` (Phase 3) recreates `publications`, `queue_items` and `schedule_slots` with the expanded
+queue/scheduler shape and adds `schedule_exceptions` — again safe because no publishing pipeline had ever populated
+them — and `ALTER`s `workspaces` (`timezone`), `channels` (`status`) and `platform_accounts` (`default_target`) in
+place, since those tables could already hold real rows from manual testing. It also recreates `jobs` only to extend
+its `job_type` CHECK list (SQLite cannot `ALTER` a CHECK constraint in place). Two partial unique indexes are the
+database-level backstop for Phase 3's core invariants — see `docs/scheduler.md` §4 for exactly what they enforce and
+why the sequential application-level check alone is not sufficient under concurrency.
+
 ## 5. IPC contract
 
 Every `#[tauri::command]` function is registered once, in `lib.rs::run()`'s `invoke_handler`. The frontend never
@@ -232,19 +253,30 @@ receives or constructs a filesystem path (section 89 of the Phase 2 brief).
   `FolderWatcherService`), exact/near-duplicate detection, and a working Content Library UI. See
   `docs/media-library.md` for the detail.
 - Real `ChannelService`/`list_channels`/`create_channel` (list + create only) so the channel-assignment pickers this
-  phase needed have real UUIDs to work with — the full Channels _screen_ is still Phase 1's mock UI.
-- `VideoRepository`/`ContentService` now back a real screen (Content); `PublicationRepository` is still unused by any
-  UI — Queue stays mock/placeholder until a future phase implements real scheduling (section 97).
+  phase needed have real UUIDs to work with — the full Channels _screen_ stayed Phase 1's mock UI until Phase 3.
+- `VideoRepository`/`ContentService` now back a real screen (Content); `PublicationRepository` existed but was unused
+  by any UI until Phase 3 implemented real scheduling.
 
-## 7. What a future phase is expected to add on top of this
+## 7. What Phase 3 added
+
+- A real, persistent queue engine and scheduler (`PublicationService`, `SchedulerService`, `ScheduleSlotService`,
+  `PlatformAccountService`) and the pure DST-safe scheduling algorithm (`domain::scheduling`) it's built on — see
+  `docs/scheduler.md` for the full detail.
+- Real Queue (List/Timeline), Calendar (Month/Week, drag-and-drop reschedule), a Channel weekly-schedule editor, and
+  real Today/Dashboard/Channels screens, replacing every remaining Queue/Channel mock.
+- Database-level concurrency safety (two partial unique indexes) for the two invariants that actually matter under
+  a real race: no double-booked schedule slot, no duplicate active publication for the same video/channel/platform.
+- The themed `confirmAction()`/`<ConfirmDialogHost/>` replacement for the two remaining `window.confirm()` call sites
+  (a Phase 2 known limitation this phase was required to close).
+
+## 8. What a future phase is expected to add on top of this
 
 - Real `PlatformConnector` implementations (OAuth flows, upload APIs, metrics/comment sync) behind the existing
-  trait — no changes to `domain` or `commands` should be required.
-- A real queue/scheduler consuming `QueueItem`/`ScheduleSlot` and the `PublishVideo`/`CollectMetrics`/`FetchComments`
-  job types (the `Job`/`JobRepository` foundation and its concurrency/idempotency patterns already exist and were
-  proven out by Phase 2's ingestion jobs).
+  trait — no changes to `domain` or `commands` should be required. `SchedulerService::due_publications` /
+  `PublicationRepository::list_due` already exist as the seam a real uploader would consume.
+- Background/async triggering for auto-schedule/rebuild/fill-gaps (the `JobType` vocabulary already exists —
+  `docs/scheduler.md` §7).
 - Bundled FFmpeg/FFprobe binaries in packaged builds (the sidecar resolution order already exists —
   `infrastructure::media::resolver` — nothing is bundled yet).
-- Calendar/Comments/Analytics/Automation screens, currently explicit placeholders.
-- Wiring the real Channels screen (health, platform connections) in place of its Phase 1 mock data, now that real
-  channel rows exist.
+- Comments/Analytics/Automation screens, currently explicit placeholders (out of scope through Phase 3, section 111).
+- A full custom-schedule-for-one-date exception system (only "skip this date" is implemented — `docs/scheduler.md` §1).

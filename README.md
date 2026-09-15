@@ -4,8 +4,9 @@ A professional, local-first desktop application for managing networks of short-f
 video, organizing it by channel, queuing and scheduling publications across YouTube, TikTok and Kwai, and tracking
 what happened along the way.
 
-This repository currently implements **Phase 1 (Foundation, Architecture, Desktop Shell and Design System)** and
-**Phase 2 (Media Library, Cut.pro Folder Watcher, FFmpeg Integration and Local Content Management)**. It is a
+This repository currently implements **Phase 1 (Foundation, Architecture, Desktop Shell and Design System)**,
+**Phase 2 (Media Library, Cut.pro Folder Watcher, FFmpeg Integration and Local Content Management)**, and
+**Phase 3 (Persistent Queue Engine, Scheduler, Calendar, Priority System and Operational Workflow)**. It is a
 production-grade base for the full product, not a throwaway prototype — see [Current implementation status](#current-implementation-status)
 for exactly what is real versus what is intentionally deferred.
 
@@ -57,23 +58,27 @@ xp-flow/
 │   ├── src/
 │   │   ├── domain/             # Entities, value objects, ports (traits) — no infra dependency
 │   │   ├── application/        # Use-case services: workspace, settings, activity, channel, source, content,
-│   │   │                       # media_ingestion_service (the one ingestion pipeline every import path uses)
+│   │   │                       # media_ingestion_service (the one ingestion pipeline every import path uses),
+│   │   │                       # publication_service, scheduler_service, schedule_slot_service,
+│   │   │                       # platform_account_service (Phase 3's queue/scheduler)
 │   │   ├── services/           # Cross-cutting technical services: media status, notifications, job_runner
 │   │   │                       # (bounded-concurrency import + folder-watcher dispatch + reconciliation)
 │   │   ├── infrastructure/     # SQLx repositories, platform connector stubs, media (FFprobe/FFmpeg), hashing
 │   │   │                       # (SHA-256 + perceptual), filesystem (stability/cache/reveal), watcher, logging
 │   │   ├── persistence/        # SQLite pool + migration bootstrap
 │   │   ├── platform/           # OS-isolated code: data paths, secure storage backend
-│   │   ├── jobs/                # Job/JobType/JobStatus/JobRepository — executes real ingestion jobs (Phase 2)
+│   │   ├── jobs/                # Job/JobType/JobStatus/JobRepository — executes real ingestion jobs (Phase 2) and
+│   │   │                       # queue reconciliation (Phase 3)
 │   │   ├── commands/            # Thin Tauri IPC command handlers + the xpflowmedia:// local preview protocol
 │   │   └── lib.rs, main.rs, state.rs, error.rs, test_support.rs
 │   └── migrations/             # SQL migrations (SQLx)
 │
-└── docs/                       # architecture.md, media-library.md, development-guidelines.md
+└── docs/                       # architecture.md, media-library.md, scheduler.md, development-guidelines.md
 ```
 
-See `docs/architecture.md` for the full explanation of why the backend is layered this way, and
-`docs/media-library.md` for the ingestion pipeline, folder watching and duplicate detection specifically.
+See `docs/architecture.md` for the full explanation of why the backend is layered this way,
+`docs/media-library.md` for the ingestion pipeline, folder watching and duplicate detection specifically, and
+`docs/scheduler.md` for the queue engine, scheduler, timezone handling and calendar specifically.
 
 ## Development requirements
 
@@ -159,6 +164,26 @@ essentials:
 - **Local preview:** click a video to open its details, or hit Space over a selection for a quick preview — playback
   streams through a custom local protocol, never exposing a raw filesystem path to the frontend.
 
+## Queue and Scheduler
+
+Phase 3 turns the Content Library into a real content-operations system. See `docs/scheduler.md` for the full
+write-up; the essentials:
+
+- **Add to Queue:** from a video's card, its action menu, or a bulk selection in the Content Library — pick a
+  channel, platform and optional priority override. Duplicate video/channel/platform combinations are rejected with a
+  clean error, enforced at both the application layer and (against a real concurrent race) the database.
+- **Manual and auto-scheduling:** schedule a queued publication to an exact time, or let the scheduler place it in
+  the channel's next available recurring slot. "Auto-schedule channel," "Fill Empty Slots" and "Rebuild Schedule"
+  operate on a whole channel at once, priority-first, inside a single database transaction.
+- **Calendar:** Month/Week views with drag-and-drop rescheduling between days (locked publications can't be
+  dragged), resolved through the workspace's configured IANA timezone — never the OS's.
+- **Channel weekly schedule editor:** per-weekday recurring time slots (channel-default or platform-specific), a
+  "copy this day to every other day" shortcut, and skip-date exceptions.
+- **Priority and locking:** every publication carries its own priority (seeded from its video, independently
+  mutable) and a lock flag that protects it from ever being moved by the auto-scheduler or a schedule rebuild.
+- **Overdue** is a derived label (a `Scheduled` publication whose time has passed), never a persisted state and never
+  a false "Failed" — Phase 3 has no real uploader to fail.
+
 ## Current implementation status
 
 **Implemented and real:**
@@ -166,7 +191,7 @@ essentials:
 - Tauri 2 + React + TypeScript (strict) + Vite shell, cross-platform window defaults
 - SQLite persistence with versioned migrations, applied automatically on startup
 - Domain model for Workspace, Channel, Platform, PlatformAccount, Video, VideoSource, Publication, QueueItem,
-  ScheduleSlot, Template, ActivityEvent, Notification, AppSettings, DuplicateMatch, Job
+  ScheduleSlot, ScheduleException, Template, ActivityEvent, Notification, AppSettings, DuplicateMatch, Job
 - A fully-typed `PublicationStatus` state machine with centrally-validated transitions (unit tested), kept entirely
   separate from `ValidationStatus`/`AvailabilityStatus` (media health has nothing to do with publishing state)
 - Typed IPC boundary (`src/lib/tauri/*` ↔ `src-tauri/src/commands/*` ↔ application services ↔ repositories), plus a
@@ -181,24 +206,31 @@ essentials:
 - A functional Content Library: search, composable filters, sort, server-side pagination, grid/list views, bulk
   selection/actions, a rich details panel, local preview (with Space/Escape quick preview), and a Folder Sources
   management screen with per-source watch status and cache accounting
+- **The full queue engine and scheduler** (Phase 3): real `Publication`/`QueueItem`/`ScheduleSlot`/
+  `ScheduleException` persistence, a pure DST-safe scheduling algorithm, manual/auto/bulk scheduling (transactional),
+  a real Queue (List/Timeline) and Calendar (Month/Week, drag-and-drop reschedule) screen, a channel weekly-schedule
+  editor, and database-level concurrency safety for the invariants that matter under a real race
 - OS-native secure storage abstraction (Keychain / Credential Manager) — implemented, not yet storing real credentials
 - Stub `PlatformConnector` implementations for YouTube/TikTok/Kwai (prove the contract; no real API calls)
 - Structured logging to a local JSON log file
-- A complete, customized UI component library (not default shadcn) and design token system
-- Every screen: Dashboard, Today, Queue (Timeline/List, still mock — see below), Content (real, Grid/List), Channels
-  (mock UI over real list/create commands), Activity (real + demo events), Settings, onboarding, plus explicit
-  placeholders for Calendar/Comments/Analytics/Automation
+- A complete, customized UI component library (not default shadcn) and design token system, including a themed
+  confirmation dialog (`confirmAction()`) replacing every native `window.confirm()`
+- Every screen: Dashboard, Today, Queue (real), Calendar (real), Content (real, Grid/List), Channels (real, including
+  pause/resume and platform-target management), Activity (real + demo events), Settings, onboarding, plus explicit
+  placeholders for Comments/Analytics/Automation
 - Command palette, notification center, collapsible sidebar, dark theme (polished) / light theme (structural)
 
-**Deliberately not implemented yet** (see `docs/architecture.md` for what each needs before it can land):
+**Deliberately not implemented yet** (see `docs/architecture.md` and `docs/scheduler.md` for what each needs before
+it can land):
 
-- Real YouTube/TikTok/Kwai API integration, OAuth, publishing, or metrics/comment sync
+- Real YouTube/TikTok/Kwai API integration, OAuth, actually publishing anywhere, or metrics/comment sync — a
+  publication can be scheduled all the way to "this UTC instant is booked," and a due-publication query already
+  exists for a future uploader to consume, but nothing calls a platform API
 - Video transcoding (FFmpeg detection and thumbnail extraction exist; re-encoding does not)
 - Bundled FFmpeg/FFprobe binaries in packaged builds (the sidecar-resolution logic exists; nothing is bundled)
-- The real queue/scheduler and the Queue screen's backing data (still Phase 1 mock) — `QueueItem`/`ScheduleSlot`
-  exist in the schema, and the job foundation Phase 2 exercised for ingestion is the same one a scheduler would use
-- The full Channels screen (health indicators, platform connections) — still Phase 1 mock UI, now sitting on top of
-  real channel rows
+- Background/async triggering of auto-schedule/rebuild/fill-gaps (the job-type vocabulary exists; nothing enqueues it
+  yet — those actions run as synchronous commands today)
+- A full custom-schedule-for-one-date exception system (only "skip this date" is implemented)
 - Automation rules, AI of any kind, cloud sync
 
 ## License

@@ -22,8 +22,8 @@ boundaries themselves.
    sections), split it — see `src/features/settings/sections/*` for the pattern.
 8. **Avoid premature abstraction, but keep the boundaries above.** Three similar lines beat a speculative
    abstraction; a domain/infrastructure boundary is not "speculative."
-9. **No placeholder implementation may pretend to be a complete feature.** If something isn't implemented (Calendar,
-   Comments, Analytics, Automation, platform connectors), it says so explicitly in the UI/code — see
+9. **No placeholder implementation may pretend to be a complete feature.** If something isn't implemented (Comments,
+   Analytics, Automation, platform connectors), it says so explicitly in the UI/code — see
    `src/components/common/placeholder-page.tsx` and `infrastructure::connectors::StubConnector`.
 10. **No silent failures.** Every `Result`/`Promise` that can fail either gets handled or is allowed to propagate as
     a typed error (`AppError` on the backend, an `AppError`-shaped rejection on the frontend) — never swallowed with
@@ -52,6 +52,27 @@ boundaries themselves.
     `FakePerceptualHashService`) behind the same ports the real FFmpeg-backed services implement — see
     `docs/media-library.md` for why.
 
+## Queue/scheduler rules (Phase 3, section 116's "zero-bug mindset")
+
+17. **Every critical scheduling invariant gets a database-level backstop, not just an application-level check.**
+    "No double-booked slot" and "no duplicate active publication for the same video/channel/platform" are each a
+    partial unique index (`migrations/0004_queue_scheduler.sql`) *in addition to* the application check — the
+    sequential check alone has a TOCTOU window under real concurrency (see `docs/scheduler.md` §4 and its
+    real-concurrent-race test). If a new scheduling invariant is added, ask whether it needs the same treatment.
+18. **Never do timezone math against the OS/browser's local zone for anything schedule-related.** Resolve through the
+    *workspace's* configured IANA timezone (`Workspace::timezone` / `useWorkspaceStore().workspace.timezone`) —
+    `domain::scheduling`/`SchedulerService` on the backend, `formatTimeInZone`/`formatDateInZone`/`localDateKeyInZone`
+    on the frontend. Plain `Date`/`Intl` calls without an explicit `timeZone` are for genuinely zone-agnostic things
+    only (e.g. calendar *grid* layout — see `calendar-dates.ts`'s own comment on why it's exempt).
+19. **"Overdue" (and any similar operationally-useful-but-not-a-real-state label) is derived, never persisted.**
+    Compute it from existing fields (`Publication::is_overdue` / `isPublicationOverdue`) rather than adding a new
+    `PublicationStatus` variant or mutating a publication's status to reflect something that hasn't actually failed.
+20. **Bulk scheduling operations are transactional; bulk queue-membership operations are per-item.** A partial bulk
+    *schedule* would leave the calendar in a confusing half-filled state, so those use
+    `PublicationRepository::bulk_update` (one transaction, all-or-nothing). A partial bulk *add-to-queue* (some
+    videos already queued for that channel/platform) is expected and benign, so that one reports a per-item outcome
+    instead. Don't default new bulk operations to one shape without asking which of these two they actually are.
+
 ## Frontend conventions
 
 - **Only `src/lib/tauri/*.ts` may import `@tauri-apps/api`.** Add a new backend feature by adding a typed wrapper
@@ -65,9 +86,10 @@ boundaries themselves.
   backend timestamp inside a component — use `formatDate`/`formatTime`/`formatRelativeTime`/etc., which handle the
   UTC → local conversion in one place.
 - **Mock data is isolated.** Anything under `src/development/mock-data/` is UI-only fixture data, typed separately
-  from real domain DTOs (`src/types/domain.ts`, `src/types/media.ts`), and is expected to be deleted the moment the
-  screen it backs is wired to a real repository/command — `content.ts` was deleted this way when the Content Library
-  went real in Phase 2; `channels.ts`/`queue.ts` remain until Queue/the full Channels screen do the same.
+  from real domain DTOs (`src/types/domain.ts`, `src/types/media.ts`, `src/types/scheduling.ts`), and is expected to
+  be deleted the moment the screen it backs is wired to a real repository/command — `content.ts` was deleted when the
+  Content Library went real in Phase 2; `queue.ts`/`channels.ts` were deleted the same way in Phase 3. What remains
+  (`activity.ts`, `dashboard.ts`'s view/performance widgets) backs screens still genuinely out of scope.
 - **State**: backend-derived data goes through TanStack Query (`src/hooks/use-*.ts`), never copied into Zustand
   (section 71) — reach for a Zustand store (`src/stores/`) only for state that has no server representation
   (selection, view mode, which panel is open). Use local `useState` for state scoped to one component subtree.
