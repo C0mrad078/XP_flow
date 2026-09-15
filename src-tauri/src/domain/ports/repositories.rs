@@ -174,6 +174,14 @@ pub trait PublicationRepository: Send + Sync {
         &self,
         channel_id: Uuid,
     ) -> DomainResult<Vec<Publication>>;
+    /// `(channel_id, count)` of `Queued`/`Scheduled` publications for
+    /// every channel in the workspace, in one query — the aggregate the
+    /// Channels screen's overview needs instead of one query per card
+    /// (section 96's N+1 fix).
+    async fn count_active_grouped_by_channel(
+        &self,
+        workspace_id: Uuid,
+    ) -> DomainResult<Vec<(Uuid, i64)>>;
 }
 
 #[async_trait]
@@ -208,6 +216,13 @@ pub trait ScheduleSlotRepository: Send + Sync {
     async fn delete(&self, id: Uuid) -> DomainResult<()>;
     async fn get(&self, id: Uuid) -> DomainResult<Option<ScheduleSlot>>;
     async fn list_for_channel(&self, channel_id: Uuid) -> DomainResult<Vec<ScheduleSlot>>;
+    /// `(channel_id, active_slot_count)` for every channel in the
+    /// workspace, in one query (section 96's N+1 fix — see
+    /// `PublicationRepository::count_active_grouped_by_channel`).
+    async fn count_active_grouped_by_channel(
+        &self,
+        workspace_id: Uuid,
+    ) -> DomainResult<Vec<(Uuid, i64)>>;
 }
 
 #[async_trait]

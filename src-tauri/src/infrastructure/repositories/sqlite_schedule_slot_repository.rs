@@ -130,4 +130,28 @@ impl ScheduleSlotRepository for SqliteScheduleSlotRepository {
         .map_err(map_repo_err)?;
         rows.iter().map(row_to_slot).collect()
     }
+
+    async fn count_active_grouped_by_channel(
+        &self,
+        workspace_id: Uuid,
+    ) -> DomainResult<Vec<(Uuid, i64)>> {
+        let rows = sqlx::query(
+            "SELECT s.channel_id AS channel_id, COUNT(*) AS c FROM schedule_slots s \
+             JOIN channels c ON c.id = s.channel_id \
+             WHERE c.workspace_id = ? AND s.is_active = 1 \
+             GROUP BY s.channel_id",
+        )
+        .bind(workspace_id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_repo_err)?;
+
+        rows.iter()
+            .map(|row| {
+                let channel_id: String = row.try_get("channel_id").map_err(map_repo_err)?;
+                let count: i64 = row.try_get("c").map_err(map_repo_err)?;
+                Ok((Uuid::parse_str(&channel_id).unwrap_or_default(), count))
+            })
+            .collect()
+    }
 }

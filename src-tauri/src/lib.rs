@@ -135,6 +135,7 @@ pub fn run() {
             commands::channel_commands::create_channel,
             commands::channel_commands::get_channel,
             commands::channel_commands::set_channel_status,
+            commands::channel_commands::get_channel_operational_overview,
             commands::import_commands::import_files,
             commands::import_commands::import_folder,
             commands::publication_commands::list_publications,
@@ -167,6 +168,13 @@ pub fn run() {
             commands::platform_account_commands::list_platform_accounts_for_workspace,
             commands::platform_account_commands::set_default_platform_account,
             commands::platform_account_commands::reassign_platform_account_channel,
+            commands::platform_auth_commands::begin_platform_connect,
+            commands::platform_auth_commands::begin_platform_reconnect,
+            commands::platform_auth_commands::poll_platform_connect_status,
+            commands::platform_auth_commands::cancel_platform_connect,
+            commands::platform_auth_commands::validate_platform_account,
+            commands::platform_auth_commands::refresh_platform_account,
+            commands::platform_auth_commands::disconnect_platform_account,
         ]);
 
     let builder = commands::media_protocol::register(builder);
@@ -238,7 +246,12 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         video_repo.clone(),
         activity_service.clone(),
     ));
-    let channel_service = Arc::new(ChannelService::new(channel_repo.clone()));
+    let channel_service = Arc::new(ChannelService::new(
+        channel_repo.clone(),
+        publication_repo.clone(),
+        schedule_slot_repo.clone(),
+        platform_account_repo.clone(),
+    ));
     let publication_service = Arc::new(PublicationService::new(
         publication_repo.clone(),
         queue_item_repo.clone(),

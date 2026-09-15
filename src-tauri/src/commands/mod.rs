@@ -10,6 +10,7 @@ pub mod import_commands;
 pub mod media_protocol;
 pub mod notification_commands;
 pub mod platform_account_commands;
+pub mod platform_auth_commands;
 pub mod publication_commands;
 pub mod schedule_slot_commands;
 pub mod scheduler_commands;

@@ -1,6 +1,7 @@
 use tauri::State;
 use uuid::Uuid;
 
+use crate::application::channel_service::ChannelOverview;
 use crate::domain::channel::{Channel, ChannelStatus};
 use crate::error::AppError;
 use crate::state::AppState;
@@ -28,6 +29,17 @@ pub async fn get_channel(
     id: Uuid,
 ) -> Result<Option<Channel>, AppError> {
     Ok(state.channel_service.get(id).await?)
+}
+
+#[tauri::command]
+pub async fn get_channel_operational_overview(
+    state: State<'_, AppState>,
+    workspace_id: Uuid,
+) -> Result<Vec<ChannelOverview>, AppError> {
+    Ok(state
+        .channel_service
+        .list_operational_overview(workspace_id)
+        .await?)
 }
 
 #[tauri::command]

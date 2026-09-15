@@ -370,6 +370,29 @@ impl PublicationRepository for SqlitePublicationRepository {
         .map_err(map_repo_err)?;
         rows.iter().map(row_to_publication).collect()
     }
+
+    async fn count_active_grouped_by_channel(
+        &self,
+        workspace_id: Uuid,
+    ) -> DomainResult<Vec<(Uuid, i64)>> {
+        let rows = sqlx::query(
+            "SELECT channel_id, COUNT(*) AS c FROM publications \
+             WHERE workspace_id = ? AND status IN ('queued', 'scheduled') \
+             GROUP BY channel_id",
+        )
+        .bind(workspace_id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_repo_err)?;
+
+        rows.iter()
+            .map(|row| {
+                let channel_id: String = row.try_get("channel_id").map_err(map_repo_err)?;
+                let count: i64 = row.try_get("c").map_err(map_repo_err)?;
+                Ok((Uuid::parse_str(&channel_id).unwrap_or_default(), count))
+            })
+            .collect()
+    }
 }
 
 fn apply_filters(builder: &mut QueryBuilder<Sqlite>, query: &PublicationListQuery) {
