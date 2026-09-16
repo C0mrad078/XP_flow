@@ -239,23 +239,22 @@ impl PlatformAuthService {
     }
 
     pub async fn refresh(&self, account_id: Uuid) -> Result<PlatformAccount, AuthError> {
-        let mut account = self.load_account(account_id).await?;
-        // Section 40: narrows (does not eliminate — see docs/platform-
-        // authentication.md's concurrency note) the window where the
-        // periodic sweep and a manual "reconnect"/"validate" click both
-        // try to refresh the same account at once. A true compare-and-
-        // swap would need a row version column; this check-then-set is a
-        // pragmatic, tested guard against the common case, and either
-        // outcome (skip vs. two harmless refreshes) never corrupts data —
-        // the last write always wins cleanly.
-        if account.status == PlatformAccountStatus::Refreshing {
+        // Section 40/154: a true CAS, not a check-then-set — `try_begin_refresh`
+        // folds "is a refresh already running" and "mark one running" into
+        // a single guarded UPDATE, so two callers racing the periodic
+        // sweep against a manual "reconnect"/"validate" click can never
+        // both pass the check and both call the provider. Exactly one
+        // wins; the other returns here without ever touching the network.
+        if !self
+            .platform_account_repo
+            .try_begin_refresh(account_id)
+            .await?
+        {
             return Err(AuthError::TokenExchangeFailed {
                 detail: "a refresh is already in progress for this account".to_string(),
             });
         }
-        account.status = PlatformAccountStatus::Refreshing;
-        account.updated_at = Utc::now();
-        let _ = self.platform_account_repo.update(&account).await;
+        let mut account = self.load_account(account_id).await?;
 
         let connector = self.connector_for(account.platform)?;
         match connector.refresh_connection(&account).await {
@@ -639,6 +638,50 @@ mod tests {
         }
     }
 
+    /// Counts how many times `refresh_connection` was actually invoked,
+    /// with a short sleep to widen the race window — proves
+    /// `PlatformAuthService::refresh`'s CAS guard, not just the
+    /// repository primitive underneath it, actually stops a second
+    /// concurrent caller from ever reaching the network.
+    struct CountingSlowConnector {
+        platform: Platform,
+        refresh_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl PlatformConnector for CountingSlowConnector {
+        fn platform(&self) -> Platform {
+            self.platform
+        }
+        async fn validate_connection(
+            &self,
+            _account: &PlatformAccount,
+        ) -> Result<ConnectedIdentity, AuthError> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn refresh_connection(
+            &self,
+            _account: &PlatformAccount,
+        ) -> Result<crate::domain::provider_identity::RefreshedCredentials, AuthError> {
+            self.refresh_calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Ok(crate::domain::provider_identity::RefreshedCredentials {
+                access_expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+                refresh_expires_at: None,
+                local_credential: None,
+            })
+        }
+        async fn disconnect(&self, _account: &PlatformAccount) -> Result<(), AuthError> {
+            Ok(())
+        }
+        async fn get_profile(
+            &self,
+            _account: &PlatformAccount,
+        ) -> Result<ConnectedIdentity, AuthError> {
+            unimplemented!("not exercised by this test")
+        }
+    }
+
     fn sample_identity(provider_account_id: &str) -> ConnectedIdentity {
         ConnectedIdentity {
             provider_account_id: provider_account_id.to_string(),
@@ -657,6 +700,21 @@ mod tests {
         pool: sqlx::SqlitePool,
         auth_provider: Arc<dyn PlatformAuthProvider>,
     ) -> (PlatformAuthService, Arc<SqlitePlatformAccountRepository>) {
+        build_service_with_connector(
+            pool,
+            auth_provider,
+            Arc::new(FakeConnector {
+                platform: Platform::TikTok,
+            }),
+        )
+        .await
+    }
+
+    async fn build_service_with_connector(
+        pool: sqlx::SqlitePool,
+        auth_provider: Arc<dyn PlatformAuthProvider>,
+        connector: Arc<dyn PlatformConnector>,
+    ) -> (PlatformAuthService, Arc<SqlitePlatformAccountRepository>) {
         let platform_account_repo = Arc::new(SqlitePlatformAccountRepository::new(pool.clone()));
         let activity_repo: Arc<dyn ActivityRepository> =
             Arc::new(SqliteActivityRepository::new(pool.clone()));
@@ -668,12 +726,7 @@ mod tests {
         let mut auth_providers: HashMap<Platform, Arc<dyn PlatformAuthProvider>> = HashMap::new();
         auth_providers.insert(Platform::TikTok, auth_provider);
         let mut connectors: HashMap<Platform, Arc<dyn PlatformConnector>> = HashMap::new();
-        connectors.insert(
-            Platform::TikTok,
-            Arc::new(FakeConnector {
-                platform: Platform::TikTok,
-            }),
-        );
+        connectors.insert(Platform::TikTok, connector);
 
         let service = PlatformAuthService::new(
             auth_providers,
@@ -891,5 +944,58 @@ mod tests {
         let state = wait_for_terminal_state(&service, session_id).await;
         assert!(matches!(state, AuthFlowState::Failed { code, .. } if code == "PERMISSION_DENIED"));
         assert!(repo.list_for_channel(channel_id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn two_concurrent_refresh_calls_only_reach_the_provider_once() {
+        let pool = temp_pool("auth-svc-refresh-cas").await;
+        let (workspace_id, _source_id) = seed_workspace_and_source(&pool).await;
+        let channel_id = seed_channel(&pool, workspace_id, "Main").await;
+        let provider =
+            FakeAuthProvider::once(Platform::TikTok, Ok(sample_identity("tiktok-refresh-race")));
+        let refresh_calls = Arc::new(AtomicUsize::new(0));
+        let (service, repo) = build_service_with_connector(
+            pool,
+            provider,
+            Arc::new(CountingSlowConnector {
+                platform: Platform::TikTok,
+                refresh_calls: refresh_calls.clone(),
+            }),
+        )
+        .await;
+
+        // Connect once so a real account row exists to refresh.
+        let session_id = service
+            .begin_connect(workspace_id, channel_id, Platform::TikTok)
+            .await
+            .unwrap();
+        assert!(matches!(
+            wait_for_terminal_state(&service, session_id).await,
+            AuthFlowState::Connected
+        ));
+        let account_id = repo.list_for_channel(channel_id).await.unwrap()[0].id;
+
+        let service = Arc::new(service);
+        let (a, b) = tokio::join!(
+            {
+                let service = service.clone();
+                async move { service.refresh(account_id).await }
+            },
+            {
+                let service = service.clone();
+                async move { service.refresh(account_id).await }
+            }
+        );
+        let successes = [a.is_ok(), b.is_ok()].into_iter().filter(|ok| *ok).count();
+
+        assert_eq!(
+            successes, 1,
+            "exactly one concurrent refresh should succeed"
+        );
+        assert_eq!(
+            refresh_calls.load(Ordering::SeqCst),
+            1,
+            "the losing caller must never reach the provider at all"
+        );
     }
 }

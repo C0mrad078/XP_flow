@@ -268,4 +268,55 @@ impl PlatformAccountRepository for SqlitePlatformAccountRepository {
         .map_err(map_repo_err)?;
         rows.iter().map(row_to_account).collect()
     }
+
+    async fn try_begin_refresh(&self, id: Uuid) -> DomainResult<bool> {
+        let result = sqlx::query(
+            "UPDATE platform_accounts SET status = 'refreshing', updated_at = ? WHERE id = ? AND status != 'refreshing'",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(map_repo_err)?;
+        Ok(result.rows_affected() == 1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{seed_channel, seed_workspace_and_source, temp_pool};
+
+    #[tokio::test]
+    async fn two_concurrent_refresh_attempts_on_the_same_account_only_one_wins() {
+        let pool = temp_pool("platform-account-refresh-cas").await;
+        let (workspace_id, _source_id) = seed_workspace_and_source(&pool).await;
+        let channel_id = seed_channel(&pool, workspace_id, "Channel").await;
+        let repo = SqlitePlatformAccountRepository::new(pool);
+        let account = PlatformAccount::new(workspace_id, channel_id, Platform::YouTube);
+        repo.create(&account).await.unwrap();
+
+        let (a, b) = tokio::join!(
+            repo.try_begin_refresh(account.id),
+            repo.try_begin_refresh(account.id)
+        );
+        let wins = [a.unwrap(), b.unwrap()].into_iter().filter(|w| *w).count();
+        assert_eq!(
+            wins, 1,
+            "exactly one of two concurrent refresh attempts should win"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_third_attempt_fails_while_a_refresh_is_already_in_progress() {
+        let pool = temp_pool("platform-account-refresh-cas-busy").await;
+        let (workspace_id, _source_id) = seed_workspace_and_source(&pool).await;
+        let channel_id = seed_channel(&pool, workspace_id, "Channel").await;
+        let repo = SqlitePlatformAccountRepository::new(pool);
+        let account = PlatformAccount::new(workspace_id, channel_id, Platform::YouTube);
+        repo.create(&account).await.unwrap();
+
+        assert!(repo.try_begin_refresh(account.id).await.unwrap());
+        assert!(!repo.try_begin_refresh(account.id).await.unwrap());
+    }
 }

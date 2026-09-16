@@ -82,6 +82,19 @@ pub trait PlatformAccountRepository: Send + Sync {
         &self,
         before: DateTime<Utc>,
     ) -> DomainResult<Vec<PlatformAccount>>;
+
+    /// Atomically claims the right to refresh this account's credential —
+    /// `UPDATE ... SET status = 'refreshing' WHERE id = ? AND status !=
+    /// 'refreshing'`. This is the true CAS Phase 5 section 154 asks for:
+    /// Phase 4's `refresh()` read `status` in Rust, decided whether to
+    /// proceed, and only *then* wrote `Refreshing` — leaving a TOCTOU gap
+    /// where two concurrent callers could both read a non-`Refreshing`
+    /// status and both proceed to call the provider. Folding the check
+    /// and the write into one guarded UPDATE closes that gap: SQLite
+    /// serializes the two statements, so only one can possibly flip zero
+    /// rows to one. Returns `true` iff this call won the right to
+    /// refresh; the loser must not call the provider at all.
+    async fn try_begin_refresh(&self, id: Uuid) -> DomainResult<bool>;
 }
 
 #[async_trait]
