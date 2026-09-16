@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { Lock, Unlock } from "lucide-react";
+import { CheckCircle2, Lock, RefreshCcw, Send, ShieldCheck, Unlock } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -26,6 +26,16 @@ import { formatDateTimeInZone } from "@/lib/formatting/date";
 import { confirmAction } from "@/stores/confirm-store";
 import { toast } from "@/stores/toast-store";
 import { useWorkspaceStore } from "@/stores/workspace-store";
+import {
+  usePublicationAttempts,
+  usePublicationMetadata,
+  usePublicationReadiness,
+  useProviderRateState,
+  usePublishNow,
+  useRecordPublicationConsent,
+  useRetryPublication,
+  useUpdatePublicationMetadata,
+} from "@/hooks/use-publishing";
 import { isAppError, isPublicationOverdue, type Publication } from "@/types/domain";
 import { VIDEO_PRIORITIES, VIDEO_PRIORITY_LABELS, type VideoPriority } from "@/types/media";
 
@@ -63,8 +73,21 @@ function DetailBody({ publication, onClose }: { publication: Publication; onClos
   const scheduleAt = useSchedulePublication();
   const autoSchedule = useAutoSchedulePublication();
   const unschedule = useUnschedulePublication();
+  const readiness = usePublicationReadiness(publication.id);
+  const rateState = useProviderRateState(publication.platform_account_id);
+  const attempts = usePublicationAttempts(publication.id);
+  const metadata = usePublicationMetadata(publication.id);
+  const publishNow = usePublishNow();
+  const retry = useRetryPublication();
+  const consent = useRecordPublicationConsent();
+  const updateMetadata = useUpdatePublicationMetadata();
 
   const [draftAt, setDraftAt] = useState("");
+  const [metadataDraft, setMetadataDraft] = useState<{
+    title: string;
+    description: string;
+    hashtags: string;
+  } | null>(null);
   const overdue = isPublicationOverdue(publication);
 
   function toDatetimeLocalValue(iso: string | null): string {
@@ -111,6 +134,17 @@ function DetailBody({ publication, onClose }: { publication: Publication; onClos
 
   const canSchedule = publication.status === "queued" || publication.status === "scheduled";
   const canCancel = publication.status !== "cancelled" && publication.status !== "archived";
+  const canPublishNow = ["queued", "scheduled", "failed", "rate_limited", "auth_required", "paused"].includes(
+    publication.status,
+  );
+  const canRetry = publication.status === "failed" || publication.status === "rate_limited";
+  const needsConsent = readiness.data?.includes("consent_required");
+  const needsVerification = publication.status === "blocked";
+  const latestAttempt = attempts.data?.[attempts.data.length - 1];
+  const progress =
+    latestAttempt?.bytes_total && latestAttempt.bytes_total > 0
+      ? Math.min(100, Math.round(((latestAttempt.bytes_uploaded ?? 0) / latestAttempt.bytes_total) * 100))
+      : null;
 
   return (
     <div className="flex flex-col gap-5">
@@ -214,6 +248,185 @@ function DetailBody({ publication, onClose }: { publication: Publication; onClos
       )}
 
       <Divider />
+
+      {readiness.data?.length || needsVerification ? (
+        <div className="rounded-md border border-warning/30 bg-warning/[0.06] p-3 text-body-small">
+          <p className="font-medium text-warning">
+            {needsVerification ? "Needs verification" : "Attention required"}
+          </p>
+          <p className="mt-1 text-caption normal-case tracking-normal">
+            {needsVerification
+              ? "XP FLOW could not safely determine whether the provider accepted this publication. Reconcile the remote state before retrying."
+              : readiness.data?.map((issue) => issue.split("_").join(" ")).join(" · ")}
+          </p>
+        </div>
+      ) : null}
+
+      {rateState.data?.some((state) => state.limited_until) && (
+        <div className="rounded-md border border-warning/30 bg-warning/[0.06] p-3 text-body-small">
+          <p className="font-medium text-warning">Provider rate limited</p>
+          <p className="mt-1 text-caption normal-case tracking-normal">
+            Retry available at{" "}
+            {new Date(
+              rateState.data.find((state) => state.limited_until)?.limited_until ?? "",
+            ).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+            .
+          </p>
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-2">
+        {canPublishNow && !needsVerification && (
+          <Button
+            size="sm"
+            onClick={() => publishNow.mutate(publication.id)}
+            disabled={publishNow.isPending || Boolean(readiness.data?.length)}
+          >
+            <Send className="size-3.5" />
+            Publish now
+          </Button>
+        )}
+        {canRetry && !needsVerification && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => retry.mutate(publication.id)}
+            disabled={retry.isPending}
+          >
+            <RefreshCcw className="size-3.5" />
+            Retry
+          </Button>
+        )}
+        {needsConsent && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => consent.mutate({ id: publication.id })}
+            disabled={consent.isPending}
+          >
+            <ShieldCheck className="size-3.5" />
+            Approve TikTok
+          </Button>
+        )}
+      </div>
+
+      {metadata.data && (
+        <div className="rounded-md border border-border bg-surface-elevated p-3">
+          <p className="text-caption font-medium uppercase tracking-wider text-muted-foreground">
+            Rendered metadata preview
+          </p>
+          <p className="mt-2 text-body-small font-medium text-foreground">{metadata.data.title}</p>
+          <p className="mt-1 line-clamp-3 text-caption normal-case tracking-normal">
+            {metadata.data.description}
+          </p>
+          {metadata.data.hashtags.length > 0 && (
+            <p className="mt-2 text-caption normal-case tracking-normal text-primary">
+              {metadata.data.hashtags.join(" ")}
+            </p>
+          )}
+          <div className="mt-3 flex flex-col gap-2">
+            <input
+              aria-label="Publication title override"
+              className="h-8 rounded-md border border-border bg-surface px-2 text-body-small text-foreground"
+              placeholder="Title override (optional)"
+              value={(metadataDraft ?? { title: "", description: "", hashtags: "" }).title}
+              onChange={(event) =>
+                setMetadataDraft((current) => ({
+                  title: event.target.value,
+                  description: current?.description ?? "",
+                  hashtags: current?.hashtags ?? "",
+                }))
+              }
+            />
+            <textarea
+              aria-label="Publication description override"
+              className="min-h-16 rounded-md border border-border bg-surface px-2 py-1.5 text-body-small text-foreground"
+              placeholder="Description override (optional)"
+              value={(metadataDraft ?? { title: "", description: "", hashtags: "" }).description}
+              onChange={(event) =>
+                setMetadataDraft((current) => ({
+                  title: current?.title ?? "",
+                  description: event.target.value,
+                  hashtags: current?.hashtags ?? "",
+                }))
+              }
+            />
+            <input
+              aria-label="Publication hashtags override"
+              className="h-8 rounded-md border border-border bg-surface px-2 text-body-small text-foreground"
+              placeholder="#hashtags separated by spaces"
+              value={(metadataDraft ?? { title: "", description: "", hashtags: "" }).hashtags}
+              onChange={(event) =>
+                setMetadataDraft((current) => ({
+                  title: current?.title ?? "",
+                  description: current?.description ?? "",
+                  hashtags: event.target.value,
+                }))
+              }
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!metadataDraft || updateMetadata.isPending}
+              onClick={() =>
+                metadataDraft &&
+                updateMetadata.mutate({
+                  id: publication.id,
+                  request: {
+                    title_override: { set: true, value: metadataDraft.title || null },
+                    description_override: { set: true, value: metadataDraft.description || null },
+                    hashtags_override: {
+                      set: true,
+                      value: metadataDraft.hashtags.split(/\s+/).filter(Boolean),
+                    },
+                  },
+                })
+              }
+            >
+              Save metadata override
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {progress !== null && (
+        <div className="rounded-md border border-border bg-surface-elevated p-3">
+          <div className="flex items-center justify-between text-caption normal-case tracking-normal">
+            <span>Upload progress</span>
+            <span>{progress}%</span>
+          </div>
+          <progress
+            className="mt-2 h-2 w-full accent-primary"
+            max={100}
+            value={progress}
+            aria-label={`Upload progress ${progress}%`}
+          />
+          <p className="mt-1 text-caption normal-case tracking-normal text-muted-foreground">
+            {(latestAttempt?.bytes_uploaded ?? 0).toLocaleString()} /{" "}
+            {(latestAttempt?.bytes_total ?? 0).toLocaleString()} bytes
+          </p>
+        </div>
+      )}
+
+      {attempts.data && attempts.data.length > 0 && (
+        <div className="flex flex-col gap-2">
+          <p className="text-body-small font-medium text-foreground">Attempt history</p>
+          {attempts.data.map((attempt) => (
+            <div
+              key={attempt.id}
+              className="flex items-center gap-2 text-caption normal-case tracking-normal"
+            >
+              <CheckCircle2
+                className={
+                  attempt.status === "succeeded" ? "size-3.5 text-success" : "size-3.5 text-muted-foreground"
+                }
+              />
+              <span>Attempt {attempt.attempt_number}</span>
+              <span className="text-muted-foreground">{attempt.error_message ?? attempt.status}</span>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="flex flex-wrap gap-2">
         {canCancel && (

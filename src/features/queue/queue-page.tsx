@@ -45,7 +45,22 @@ export function QueuePage() {
     isLoading,
     isError,
     refetch,
-  } = useQueueList({ statuses: ["queued", "scheduled"], page_size: 200 });
+  } = useQueueList({
+    statuses: [
+      "queued",
+      "scheduled",
+      "uploading",
+      "processing",
+      "published",
+      "failed",
+      "retry_wait",
+      "rate_limited",
+      "auth_required",
+      "blocked",
+      "paused",
+    ],
+    page_size: 200,
+  });
 
   const channelNames = new Map(channels.map((c) => [c.id, c.name]));
   const publications: Publication[] = page?.items ?? [];

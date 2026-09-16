@@ -13,5 +13,6 @@ export { settingsApi } from "./settings";
 export { sourcesApi } from "./sources";
 export { systemApi } from "./system";
 export { workspaceApi } from "./workspace";
+export { publishingApi } from "./publishing";
 export type { UpdateSettingsInput } from "./settings";
 export type { Channel, ChannelOverview, ChannelStatus } from "./channels";

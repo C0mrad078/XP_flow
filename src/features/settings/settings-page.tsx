@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Bell, HardDrive, Info, Palette, Plug, SlidersHorizontal, User } from "lucide-react";
+import { Bell, HardDrive, Info, Palette, Plug, Radio, SlidersHorizontal, User } from "lucide-react";
 
 import { PageContainer } from "@/components/common/page-container";
 import { PageHeader } from "@/components/common/page-header";
@@ -10,12 +10,14 @@ import { AppearanceSection } from "./sections/appearance-section";
 import { GeneralSection } from "./sections/general-section";
 import { IntegrationsSection } from "./sections/integrations-section";
 import { NotificationsSection } from "./sections/notifications-section";
+import { PublishingSection } from "./sections/publishing-section";
 import { StorageSection } from "./sections/storage-section";
 import { SettingsNav, type SettingsSection } from "./settings-nav";
 
 const SECTIONS: SettingsSection[] = [
   { id: "general", label: "General", icon: User },
   { id: "integrations", label: "Integrations", icon: Plug },
+  { id: "publishing", label: "Publishing", icon: Radio },
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "storage", label: "Storage", icon: HardDrive },
   { id: "notifications", label: "Notifications", icon: Bell },
@@ -35,6 +37,7 @@ export function SettingsPage() {
         <div className="min-w-0 flex-1">
           {active === "general" && <GeneralSection />}
           {active === "integrations" && <IntegrationsSection />}
+          {active === "publishing" && <PublishingSection />}
           {active === "appearance" && <AppearanceSection />}
           {active === "storage" && <StorageSection />}
           {active === "notifications" && <NotificationsSection />}
