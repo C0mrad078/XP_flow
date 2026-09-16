@@ -74,4 +74,17 @@ pub trait PlatformConnector: Send + Sync {
     ) -> Result<(), AuthError> {
         Ok(())
     }
+
+    /// Returns a currently-usable raw access token for this account
+    /// (section 155) — the single method `CredentialAcquisitionService`
+    /// calls for every provider, so no publishing code anywhere else ever
+    /// touches a keychain or the Auth Broker directly. Each connector's
+    /// implementation differs in exactly the way its storage does:
+    /// YouTube reads its already-refreshed OS-keychain credential (the
+    /// caller is responsible for triggering a refresh beforehand when
+    /// needed); TikTok/Kwai call the broker's access-token endpoint,
+    /// which transparently refreshes server-side first if the stored
+    /// token is expiring soon, so no separate desktop-side refresh
+    /// decision is needed for those two at all.
+    async fn acquire_access_token(&self, account: &PlatformAccount) -> Result<String, AuthError>;
 }

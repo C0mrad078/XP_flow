@@ -83,4 +83,10 @@ impl PlatformConnector for TikTokConnector {
     async fn get_profile(&self, account: &PlatformAccount) -> Result<ConnectedIdentity, AuthError> {
         self.validate_connection(account).await
     }
+
+    async fn acquire_access_token(&self, account: &PlatformAccount) -> Result<String, AuthError> {
+        let connection_id = Self::connection_id(account)?;
+        let token = self.broker.issue_access_token(connection_id).await?;
+        Ok(token.access_token)
+    }
 }

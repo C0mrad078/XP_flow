@@ -636,6 +636,12 @@ mod tests {
         ) -> Result<ConnectedIdentity, AuthError> {
             unimplemented!("not exercised by these tests")
         }
+        async fn acquire_access_token(
+            &self,
+            _account: &PlatformAccount,
+        ) -> Result<String, AuthError> {
+            unimplemented!("not exercised by these tests")
+        }
     }
 
     /// Counts how many times `refresh_connection` was actually invoked,
@@ -678,6 +684,12 @@ mod tests {
             &self,
             _account: &PlatformAccount,
         ) -> Result<ConnectedIdentity, AuthError> {
+            unimplemented!("not exercised by this test")
+        }
+        async fn acquire_access_token(
+            &self,
+            _account: &PlatformAccount,
+        ) -> Result<String, AuthError> {
             unimplemented!("not exercised by this test")
         }
     }

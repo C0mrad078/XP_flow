@@ -165,4 +165,10 @@ impl PlatformConnector for YouTubeConnector {
     ) -> Result<(), AuthError> {
         self.store_credential(account_id, credential).await
     }
+
+    async fn acquire_access_token(&self, account: &PlatformAccount) -> Result<String, AuthError> {
+        self.load_credential(account.id)
+            .await
+            .map(|c| c.access_token)
+    }
 }

@@ -76,6 +76,12 @@ impl PlatformConnector for StubConnector {
             detail: self.reason.clone(),
         })
     }
+
+    async fn acquire_access_token(&self, _account: &PlatformAccount) -> Result<String, AuthError> {
+        Err(AuthError::ProviderNotConfigured {
+            detail: self.reason.clone(),
+        })
+    }
 }
 
 /// The `PlatformAuthProvider` counterpart to `StubConnector` — wired in

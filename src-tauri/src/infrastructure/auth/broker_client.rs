@@ -55,6 +55,25 @@ struct BrokerErrorBody {
     message: String,
 }
 
+/// The one broker response that carries a raw bearer token — Phase 5's
+/// direct-upload seam (see `docs/auth-broker.md` §8). `Debug` is
+/// intentionally not derived with the token's value; same redaction
+/// discipline as `LocalCredential`/`Pkce`.
+#[derive(Clone, Deserialize)]
+pub struct BrokerAccessToken {
+    pub access_token: String,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+impl std::fmt::Debug for BrokerAccessToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrokerAccessToken")
+            .field("access_token", &"[redacted]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
 /// Desktop-side HTTP client for the Auth Broker (section 20/24). Every
 /// route it calls is hardcoded here — this client never accepts an
 /// arbitrary URL from a caller, matching the broker's own no-generic-proxy
@@ -118,6 +137,25 @@ impl BrokerClient {
         connection_id: &str,
     ) -> Result<BrokerConnection, AuthError> {
         let url = format!("{}/v1/connections/{connection_id}/refresh", self.base_url);
+        self.post_empty(&url).await
+    }
+
+    /// The one deliberate exception to "the broker never hands back a raw
+    /// token" (see `docs/auth-broker.md` §8) — Phase 5's TikTok/Kwai
+    /// uploads stream directly from the desktop to the provider, never
+    /// through this broker, so the desktop needs the bearer token itself
+    /// to make that call. The broker refreshes first if the stored token
+    /// is expiring soon, so this is the single authoritative call
+    /// `CredentialAcquisitionService` makes for a brokered provider
+    /// (section 155) — never a separate desktop-side refresh.
+    pub async fn issue_access_token(
+        &self,
+        connection_id: &str,
+    ) -> Result<BrokerAccessToken, AuthError> {
+        let url = format!(
+            "{}/v1/connections/{connection_id}/access-token",
+            self.base_url
+        );
         self.post_empty(&url).await
     }
 
