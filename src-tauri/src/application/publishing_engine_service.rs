@@ -9,7 +9,9 @@ use uuid::Uuid;
 use crate::application::activity_service::ActivityService;
 use crate::application::credential_acquisition_service::CredentialAcquisitionService;
 use crate::application::provider_rate_limit_service::ProviderRateLimitService;
+use crate::application::settings_service::SettingsService;
 use crate::domain::activity_event::{ActivityCategory, ActivityLevel};
+use crate::domain::app_settings::MissedSchedulePolicy;
 use crate::domain::channel::ChannelStatus;
 use crate::domain::platform::Platform;
 use crate::domain::ports::hashing::ContentHashService;
@@ -102,6 +104,7 @@ pub struct PublishingEngineService {
     credential_service: Arc<CredentialAcquisitionService>,
     metadata_service: Arc<crate::application::metadata_template_service::MetadataTemplateService>,
     rate_limit_service: Arc<ProviderRateLimitService>,
+    settings_service: Arc<SettingsService>,
     publishers: HashMap<Platform, Arc<dyn PlatformPublisher>>,
     activity_service: Arc<ActivityService>,
     notification_service: Arc<NotificationService>,
@@ -123,6 +126,7 @@ impl PublishingEngineService {
             crate::application::metadata_template_service::MetadataTemplateService,
         >,
         rate_limit_service: Arc<ProviderRateLimitService>,
+        settings_service: Arc<SettingsService>,
         publishers: HashMap<Platform, Arc<dyn PlatformPublisher>>,
         activity_service: Arc<ActivityService>,
         notification_service: Arc<NotificationService>,
@@ -139,6 +143,7 @@ impl PublishingEngineService {
             credential_service,
             metadata_service,
             rate_limit_service,
+            settings_service,
             publishers,
             activity_service,
             notification_service,
@@ -154,6 +159,20 @@ impl PublishingEngineService {
     /// in between (section 14/122).
     pub async fn scan_and_claim_due(&self, workspace_id: Uuid) -> Vec<(Uuid, String)> {
         let now = Utc::now();
+        // Section 55/58: a global disable/pause stops the periodic scan
+        // from claiming anything new — an upload already in flight keeps
+        // running to whatever terminal state it reaches on its own
+        // (never a fake instant cancellation), but nothing new starts.
+        let publishing_settings = self
+            .settings_service
+            .get()
+            .await
+            .map(|s| s.publishing)
+            .unwrap_or_default();
+        if !publishing_settings.enabled || publishing_settings.paused {
+            return Vec::new();
+        }
+
         let due = match self.publication_repo.list_due(workspace_id, now).await {
             Ok(due) => due,
             Err(_) => return Vec::new(),
@@ -165,6 +184,33 @@ impl PublishingEngineService {
                 Ok(Some(channel)) if channel.status == ChannelStatus::Paused => continue,
                 Ok(Some(_)) => {}
                 _ => continue,
+            }
+
+            // Section 55/57: a publication overdue beyond the configured
+            // grace period follows the workspace's missed-schedule
+            // policy instead of being claimed as if it were merely a
+            // little late.
+            let overdue_minutes = publication
+                .scheduled_at
+                .map(|at| (now - at).num_minutes())
+                .unwrap_or(0);
+            if overdue_minutes > publishing_settings.missed_schedule_grace_period_minutes as i64 {
+                match publishing_settings.missed_schedule_policy {
+                    MissedSchedulePolicy::PublishWithinGrace
+                    | MissedSchedulePolicy::NeedsReview => {
+                        // Never claimed while beyond grace under either
+                        // policy — PublishWithinGrace only ever
+                        // auto-publishes *within* the window; beyond it,
+                        // both policies leave the row `Scheduled` for a
+                        // human to see (via readiness/UI), never
+                        // force-publishing very stale content.
+                        continue;
+                    }
+                    MissedSchedulePolicy::Skip => {
+                        self.skip_missed_publication(&publication).await;
+                        continue;
+                    }
+                }
             }
 
             let claim_token = Uuid::new_v4().to_string();
@@ -207,6 +253,20 @@ impl PublishingEngineService {
     /// scan, so it gets the same exactly-once guarantee — this is never a
     /// separate, parallel execution path.
     pub async fn publish_now(&self, publication_id: Uuid) -> Result<(), PublishError> {
+        // Section 58: a global pause is a hard stop — "Publish Now" is
+        // not a backdoor around it. Resume first, then publish.
+        let publishing_settings = self
+            .settings_service
+            .get()
+            .await
+            .map(|s| s.publishing)
+            .unwrap_or_default();
+        if !publishing_settings.enabled || publishing_settings.paused {
+            return Err(PublishError::Internal {
+                detail: "publishing is currently paused for this workspace".to_string(),
+            });
+        }
+
         let mut publication = self
             .publication_repo
             .get(publication_id)
@@ -1121,6 +1181,40 @@ impl PublishingEngineService {
         let _ = self.publication_repo.update(&fresh).await;
     }
 
+    /// Section 57: the `Skip` missed-schedule policy for a publication
+    /// overdue beyond its grace period. `Scheduled` has no direct
+    /// transition to `Failed` in the state machine, so this reuses the
+    /// existing `Cancelled` terminal state rather than adding a new one
+    /// — the distinguishing signal from a manual cancel is `last_error`
+    /// and this specific activity-log entry.
+    async fn skip_missed_publication(&self, publication: &Publication) {
+        let Ok(Some(mut fresh)) = self.publication_repo.get(publication.id).await else {
+            return;
+        };
+        if fresh.status != PublicationStatus::Scheduled {
+            return;
+        }
+        if fresh.transition(PublicationStatus::Cancelled).is_err() {
+            return;
+        }
+        fresh.last_error = Some(
+            "Missed its scheduled window beyond the configured grace period; the workspace's missed-schedule policy is set to skip execution".to_string(),
+        );
+        if self.publication_repo.update(&fresh).await.is_ok() {
+            let _ = self
+                .activity_service
+                .log(
+                    ActivityCategory::Publication,
+                    ActivityLevel::Warning,
+                    format!(
+                        "\"{}\" was skipped — it missed its scheduled window",
+                        publication.title
+                    ),
+                )
+                .await;
+        }
+    }
+
     async fn log_success(&self, publication: &Publication) {
         let _ = self
             .activity_service
@@ -1163,7 +1257,7 @@ mod tests {
     use crate::infrastructure::repositories::{
         SqliteActivityRepository, SqliteChannelRepository, SqliteNotificationRepository,
         SqlitePlatformAccountRepository, SqlitePublicationAttemptRepository,
-        SqlitePublicationConsentRepository, SqlitePublicationRepository,
+        SqlitePublicationConsentRepository, SqlitePublicationRepository, SqliteSettingsRepository,
         SqliteUploadSessionRepository, SqliteVideoRepository,
     };
     use crate::test_support::*;
@@ -1302,6 +1396,9 @@ mod tests {
                     ),
                 ),
             ),
+            Arc::new(SettingsService::new(Arc::new(
+                SqliteSettingsRepository::new(pool.clone()),
+            ))),
             publishers,
             activity_service,
             notification_service,
@@ -1919,5 +2016,93 @@ mod tests {
             attempts.is_empty(),
             "a rate-limited account must never even reach attempt creation, let alone the provider"
         );
+    }
+
+    #[tokio::test]
+    async fn a_global_pause_stops_the_scan_from_claiming_anything() {
+        let fixture = build_fixture(FakeScenario::Success).await;
+        let pool = fixture.pool.clone();
+        seed_ready_publication(
+            &pool,
+            fixture.workspace_id,
+            fixture.channel_id,
+            fixture.source_id,
+        )
+        .await;
+
+        let settings_service =
+            SettingsService::new(Arc::new(SqliteSettingsRepository::new(pool.clone())));
+        settings_service.set_publishing_paused(true).await.unwrap();
+
+        let claimed = fixture
+            .engine
+            .scan_and_claim_due(fixture.workspace_id)
+            .await;
+        assert!(claimed.is_empty(), "a paused workspace must claim nothing");
+
+        // publish_now must not be a backdoor around the pause either.
+        let publication_id = fixture
+            .publication_repo
+            .list_due(fixture.workspace_id, Utc::now())
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+            .id;
+        let result = fixture.engine.publish_now(publication_id).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn the_skip_missed_schedule_policy_cancels_an_overdue_publication_instead_of_publishing_it(
+    ) {
+        let fixture = build_fixture(FakeScenario::Success).await;
+        let pool = fixture.pool.clone();
+        let publication_id = seed_ready_publication(
+            &pool,
+            fixture.workspace_id,
+            fixture.channel_id,
+            fixture.source_id,
+        )
+        .await;
+        let mut publication = fixture
+            .publication_repo
+            .get(publication_id)
+            .await
+            .unwrap()
+            .unwrap();
+        publication.scheduled_at = Some(Utc::now() - Duration::hours(2));
+        fixture.publication_repo.update(&publication).await.unwrap();
+
+        let settings_service =
+            SettingsService::new(Arc::new(SqliteSettingsRepository::new(pool.clone())));
+        settings_service
+            .update_publishing(
+                crate::application::settings_service::UpdatePublishingSettingsInput {
+                    missed_schedule_policy: Some(
+                        crate::domain::app_settings::MissedSchedulePolicy::Skip,
+                    ),
+                    missed_schedule_grace_period_minutes: Some(0),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let claimed = fixture
+            .engine
+            .scan_and_claim_due(fixture.workspace_id)
+            .await;
+        assert!(claimed.is_empty());
+
+        let updated = fixture
+            .publication_repo
+            .get(publication_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, PublicationStatus::Cancelled);
+        assert!(updated.last_error.is_some());
     }
 }

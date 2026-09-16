@@ -130,6 +130,10 @@ pub fn run() {
             commands::workspace_commands::update_workspace_timezone,
             commands::settings_commands::get_settings,
             commands::settings_commands::update_settings,
+            commands::settings_commands::get_publishing_settings,
+            commands::settings_commands::update_publishing_settings,
+            commands::settings_commands::pause_publishing,
+            commands::settings_commands::resume_publishing,
             commands::activity_commands::list_recent_activity,
             commands::notification_commands::list_recent_notifications,
             commands::notification_commands::unread_notification_count,
@@ -526,6 +530,7 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         credential_service,
         metadata_template_service.clone(),
         provider_rate_limit_service.clone(),
+        settings_service.clone(),
         publishers.clone(),
         activity_service.clone(),
         notification_service.clone(),
@@ -614,11 +619,21 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         publishing_engine_service
             .recover_interrupted(workspace.id)
             .await;
+        // Section 56: sized from the real, persisted setting — falls
+        // back to the hardcoded default only if settings can't be read
+        // at all. A change to this value takes effect on the next
+        // restart (see docs/publishing-ui.md), not live.
+        let max_concurrent_uploads = settings_service
+            .get()
+            .await
+            .map(|s| s.publishing.max_concurrent_uploads as usize)
+            .unwrap_or(DEFAULT_MAX_CONCURRENT_UPLOADS)
+            .max(1);
         job_runner.clone().spawn_periodic_publish_scan(
             publishing_engine_service.clone(),
             workspace.id,
             PUBLISH_SCAN_INTERVAL,
-            DEFAULT_MAX_CONCURRENT_UPLOADS,
+            max_concurrent_uploads,
         );
         job_runner.clone().spawn_periodic_processing_poll(
             publishing_engine_service.clone(),
