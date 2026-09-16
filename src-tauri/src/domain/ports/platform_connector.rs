@@ -5,7 +5,6 @@ use crate::domain::auth_error::AuthError;
 use crate::domain::platform::Platform;
 use crate::domain::platform_account::PlatformAccount;
 use crate::domain::provider_identity::{ConnectedIdentity, RefreshedCredentials};
-use crate::domain::publication::Publication;
 
 #[derive(Debug, Error)]
 pub enum PlatformConnectorError {
@@ -25,14 +24,15 @@ pub enum PlatformConnectorError {
 /// Contract every social-platform integration (YouTube, TikTok, Kwai) must
 /// satisfy for an *already-connected* account (section 35). Starting a
 /// brand-new authorization is a separate concern — see
-/// `domain::ports::platform_auth_provider::PlatformAuthProvider`.
-///
-/// Phase 1-3 shipped stub adapters that returned `NotImplemented` for
-/// everything; Phase 4 implements the account-lifecycle methods for real
-/// per provider. The publishing-related methods stay defined-but-
-/// unimplemented until Phase 5 (section 112) — fixing their shape now is
-/// what lets Phase 5 add a real implementation without touching any
-/// caller.
+/// `domain::ports::platform_auth_provider::PlatformAuthProvider`; actually
+/// publishing is a separate concern too — see
+/// `domain::ports::platform_publisher::PlatformPublisher`, which replaced
+/// this trait's original Phase 4 publish-related placeholder methods
+/// (`publish_video`/`get_publication_status`/`fetch_metrics`/
+/// `fetch_comments`) once Phase 5 needed a shape rich enough for
+/// resumable/chunked/multi-step uploads. Metrics/comments will get their
+/// own dedicated trait when a later phase actually implements them,
+/// rather than living here unimplemented in the meantime.
 #[async_trait]
 pub trait PlatformConnector: Send + Sync {
     fn platform(&self) -> Platform;
@@ -74,22 +74,4 @@ pub trait PlatformConnector: Send + Sync {
     ) -> Result<(), AuthError> {
         Ok(())
     }
-
-    // --- Phase 5 seam: defined now, deliberately unimplemented (section 112) ---
-    async fn publish_video(
-        &self,
-        publication: &Publication,
-    ) -> Result<String, PlatformConnectorError>;
-    async fn get_publication_status(
-        &self,
-        remote_id: &str,
-    ) -> Result<String, PlatformConnectorError>;
-    async fn fetch_metrics(
-        &self,
-        remote_id: &str,
-    ) -> Result<serde_json::Value, PlatformConnectorError>;
-    async fn fetch_comments(
-        &self,
-        remote_id: &str,
-    ) -> Result<serde_json::Value, PlatformConnectorError>;
 }

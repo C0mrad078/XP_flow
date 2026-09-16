@@ -16,9 +16,8 @@ use crate::domain::oauth::AuthSession;
 use crate::domain::platform::Platform;
 use crate::domain::platform_account::PlatformAccount;
 use crate::domain::ports::platform_auth_provider::PlatformAuthProvider;
-use crate::domain::ports::platform_connector::{PlatformConnector, PlatformConnectorError};
+use crate::domain::ports::platform_connector::PlatformConnector;
 use crate::domain::provider_identity::ConnectedIdentity;
-use crate::domain::publication::Publication;
 
 /// Wired in for a platform whose non-secret developer configuration
 /// (client id/key, or the Auth Broker itself) is unavailable at startup —
@@ -75,42 +74,6 @@ impl PlatformConnector for StubConnector {
     ) -> Result<ConnectedIdentity, AuthError> {
         Err(AuthError::ProviderNotConfigured {
             detail: self.reason.clone(),
-        })
-    }
-
-    async fn publish_video(
-        &self,
-        _publication: &Publication,
-    ) -> Result<String, PlatformConnectorError> {
-        Err(PlatformConnectorError::NotImplemented {
-            platform: self.platform,
-        })
-    }
-
-    async fn get_publication_status(
-        &self,
-        _remote_id: &str,
-    ) -> Result<String, PlatformConnectorError> {
-        Err(PlatformConnectorError::NotImplemented {
-            platform: self.platform,
-        })
-    }
-
-    async fn fetch_metrics(
-        &self,
-        _remote_id: &str,
-    ) -> Result<serde_json::Value, PlatformConnectorError> {
-        Err(PlatformConnectorError::NotImplemented {
-            platform: self.platform,
-        })
-    }
-
-    async fn fetch_comments(
-        &self,
-        _remote_id: &str,
-    ) -> Result<serde_json::Value, PlatformConnectorError> {
-        Err(PlatformConnectorError::NotImplemented {
-            platform: self.platform,
         })
     }
 }

@@ -637,38 +637,6 @@ mod tests {
         ) -> Result<ConnectedIdentity, AuthError> {
             unimplemented!("not exercised by these tests")
         }
-        async fn publish_video(
-            &self,
-            _p: &crate::domain::publication::Publication,
-        ) -> Result<String, crate::domain::ports::platform_connector::PlatformConnectorError>
-        {
-            unimplemented!()
-        }
-        async fn get_publication_status(
-            &self,
-            _r: &str,
-        ) -> Result<String, crate::domain::ports::platform_connector::PlatformConnectorError>
-        {
-            unimplemented!()
-        }
-        async fn fetch_metrics(
-            &self,
-            _r: &str,
-        ) -> Result<
-            serde_json::Value,
-            crate::domain::ports::platform_connector::PlatformConnectorError,
-        > {
-            unimplemented!()
-        }
-        async fn fetch_comments(
-            &self,
-            _r: &str,
-        ) -> Result<
-            serde_json::Value,
-            crate::domain::ports::platform_connector::PlatformConnectorError,
-        > {
-            unimplemented!()
-        }
     }
 
     fn sample_identity(provider_account_id: &str) -> ConnectedIdentity {

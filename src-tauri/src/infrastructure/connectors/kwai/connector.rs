@@ -3,9 +3,8 @@ use async_trait::async_trait;
 use crate::domain::auth_error::AuthError;
 use crate::domain::platform::Platform;
 use crate::domain::platform_account::PlatformAccount;
-use crate::domain::ports::platform_connector::{PlatformConnector, PlatformConnectorError};
+use crate::domain::ports::platform_connector::PlatformConnector;
 use crate::domain::provider_identity::{ConnectedIdentity, RefreshedCredentials};
-use crate::domain::publication::Publication;
 use crate::infrastructure::auth::BrokerClient;
 
 /// Kwai's post-connection operations are pure broker delegation, same
@@ -78,41 +77,5 @@ impl PlatformConnector for KwaiConnector {
 
     async fn get_profile(&self, account: &PlatformAccount) -> Result<ConnectedIdentity, AuthError> {
         self.validate_connection(account).await
-    }
-
-    async fn publish_video(
-        &self,
-        _publication: &Publication,
-    ) -> Result<String, PlatformConnectorError> {
-        Err(PlatformConnectorError::NotImplemented {
-            platform: Platform::Kwai,
-        })
-    }
-
-    async fn get_publication_status(
-        &self,
-        _remote_id: &str,
-    ) -> Result<String, PlatformConnectorError> {
-        Err(PlatformConnectorError::NotImplemented {
-            platform: Platform::Kwai,
-        })
-    }
-
-    async fn fetch_metrics(
-        &self,
-        _remote_id: &str,
-    ) -> Result<serde_json::Value, PlatformConnectorError> {
-        Err(PlatformConnectorError::NotImplemented {
-            platform: Platform::Kwai,
-        })
-    }
-
-    async fn fetch_comments(
-        &self,
-        _remote_id: &str,
-    ) -> Result<serde_json::Value, PlatformConnectorError> {
-        Err(PlatformConnectorError::NotImplemented {
-            platform: Platform::Kwai,
-        })
     }
 }
