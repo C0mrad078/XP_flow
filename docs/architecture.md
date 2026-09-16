@@ -269,14 +269,35 @@ receives or constructs a filesystem path (section 89 of the Phase 2 brief).
 - The themed `confirmAction()`/`<ConfirmDialogHost/>` replacement for the two remaining `window.confirm()` call sites
   (a Phase 2 known limitation this phase was required to close).
 
-## 8. What a future phase is expected to add on top of this
+## 8. What Phase 4 added
 
-- Real `PlatformConnector` implementations (OAuth flows, upload APIs, metrics/comment sync) behind the existing
-  trait — no changes to `domain` or `commands` should be required. `SchedulerService::due_publications` /
-  `PublicationRepository::list_due` already exist as the seam a real uploader would consume.
+- Real OAuth account connection for YouTube (direct, PKCE, loopback), TikTok (desktop-captured code, broker-
+  exchanged) and Kwai (entirely broker-owned) — see `docs/platform-authentication.md` for the full write-up.
+- A new, separately deployable **Auth Broker** service (`services/auth-broker/`, not a Cargo workspace member) that
+  holds TikTok/Kwai client secrets so the desktop binary never has to — see `docs/auth-broker.md`.
+- An expanded `PlatformAccount` domain model (typed 8-state lifecycle, derived `Capability`s from granted scopes,
+  derived-only `ConnectionHealth`), replacing Phase 1/3's placeholder shape — see `docs/provider-capabilities.md`.
+- `PlatformAuthService` (background-task/poll/cancel connect flow) and `TokenLifecycleService` (periodic refresh
+  sweep, reusing the existing `JobRunner` rather than a second worker system).
+- Database-level identity-uniqueness (a real provider account can't be connected twice in a workspace) alongside
+  the application-layer check, replacing the old `UNIQUE(channel_id, platform)` constraint that conflicted with
+  `default_target` ever making sense.
+- `ChannelService::list_operational_overview` — the section-96 N+1 fix for `ChannelCard`, four workspace-scoped
+  queries total regardless of channel count, replacing three IPC round trips per rendered card.
+- A real Settings → Integrations screen, and real per-platform connection state (never queue-cancelling) on
+  Channels/Queue/Dashboard.
+
+## 9. What a future phase is expected to add on top of this
+
+- Real publishing (`PlatformConnector::publish_video`/`get_publication_status`/`fetch_metrics`/`fetch_comments` are
+  defined as a typed `NotImplemented` seam specifically so this shouldn't require touching `domain` or `commands`).
+  `SchedulerService::due_publications`/`PublicationRepository::list_due` already exist as the seam a real uploader
+  would consume.
 - Background/async triggering for auto-schedule/rebuild/fill-gaps (the `JobType` vocabulary already exists —
   `docs/scheduler.md` §7).
 - Bundled FFmpeg/FFprobe binaries in packaged builds (the sidecar resolution order already exists —
   `infrastructure::media::resolver` — nothing is bundled yet).
-- Comments/Analytics/Automation screens, currently explicit placeholders (out of scope through Phase 3, section 111).
+- Comments/Analytics/Automation screens, currently explicit placeholders (out of scope through Phase 4).
 - A full custom-schedule-for-one-date exception system (only "skip this date" is implemented — `docs/scheduler.md` §1).
+- `domain::readiness::compute_readiness` is built and unit tested but not wired to a command yet — Queue/Dashboard
+  currently mirror an equivalent check client-side against already-fetched data instead.

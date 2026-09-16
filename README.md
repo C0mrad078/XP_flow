@@ -5,8 +5,9 @@ video, organizing it by channel, queuing and scheduling publications across YouT
 what happened along the way.
 
 This repository currently implements **Phase 1 (Foundation, Architecture, Desktop Shell and Design System)**,
-**Phase 2 (Media Library, Cut.pro Folder Watcher, FFmpeg Integration and Local Content Management)**, and
-**Phase 3 (Persistent Queue Engine, Scheduler, Calendar, Priority System and Operational Workflow)**. It is a
+**Phase 2 (Media Library, Cut.pro Folder Watcher, FFmpeg Integration and Local Content Management)**,
+**Phase 3 (Persistent Queue Engine, Scheduler, Calendar, Priority System and Operational Workflow)**, and
+**Phase 4 (Real Platform Authentication, Account Management, OAuth Lifecycle and Connector Foundation)**. It is a
 production-grade base for the full product, not a throwaway prototype — see [Current implementation status](#current-implementation-status)
 for exactly what is real versus what is intentionally deferred.
 
@@ -127,6 +128,12 @@ cargo clippy   # Lint
 cargo build    # Compile
 ```
 
+The desktop app runs and connects a real YouTube account with no other setup beyond `YOUTUBE_CLIENT_ID`/
+`YOUTUBE_CLIENT_SECRET` in its environment. TikTok/Kwai need the separate Auth Broker service running too — see
+`docs/auth-broker.md` for setup (`services/auth-broker/`, its own `cargo test`/`cargo build`, its own `.env`).
+Neither is required to build or run XP FLOW itself; an unconfigured provider degrades to a clean
+"not configured" state instead of failing to start.
+
 ## Where XP FLOW stores its data
 
 | OS      | Location                                 |
@@ -184,6 +191,27 @@ write-up; the essentials:
 - **Overdue** is a derived label (a `Scheduled` publication whose time has passed), never a persisted state and never
   a false "Failed" — Phase 3 has no real uploader to fail.
 
+## Platform authentication
+
+Phase 4 adds real OAuth account connection for YouTube, TikTok and Kwai — connect, validate, refresh and disconnect,
+never real video publishing (that's Phase 5). See `docs/platform-authentication.md`, `docs/auth-broker.md` and
+`docs/provider-capabilities.md` for the full write-up; the essentials:
+
+- **YouTube** goes straight to Google — Authorization Code + PKCE, system browser, a loopback listener bound only
+  to `127.0.0.1`, no embedded browser, no broker.
+- **TikTok** captures its own authorization code on a desktop loopback listener, then hands the confidential
+  code-for-token exchange to a small separate **Auth Broker** service (`services/auth-broker/`) that holds the
+  TikTok client secret so the desktop binary never has to.
+- **Kwai**'s entire flow is broker-owned — the desktop only opens a browser to a broker-issued URL and polls for
+  completion; Kwai's own redirect lands on the broker, never on the desktop.
+- A `PlatformAccount` carries derived `Capability`s (`ReadProfile`, `UploadVideo`, ...) from granted scopes, and a
+  derived-only `ConnectionHealth` distinct from its persisted `PlatformAccountStatus` — "connected" and "approved
+  to publish" are never the same claim.
+- The same real provider account can't be connected twice in a workspace (enforced at the database and the
+  application layer); reconnecting with a different real account fails closed and requires explicit confirmation.
+- Settings → Integrations (provider cards, connect/manage/disconnect) and the Channels screen both use the same
+  connect flow and the same `ChannelOverview` aggregate query introduced to fix a documented N+1 IPC pattern.
+
 ## Current implementation status
 
 **Implemented and real:**
@@ -210,8 +238,13 @@ write-up; the essentials:
   `ScheduleException` persistence, a pure DST-safe scheduling algorithm, manual/auto/bulk scheduling (transactional),
   a real Queue (List/Timeline) and Calendar (Month/Week, drag-and-drop reschedule) screen, a channel weekly-schedule
   editor, and database-level concurrency safety for the invariants that matter under a real race
-- OS-native secure storage abstraction (Keychain / Credential Manager) — implemented, not yet storing real credentials
-- Stub `PlatformConnector` implementations for YouTube/TikTok/Kwai (prove the contract; no real API calls)
+- **Real platform authentication** (Phase 4): YouTube OAuth 2.0 + PKCE direct to Google; TikTok Login Kit + PKCE
+  with the confidential exchange handled by the separate Auth Broker service; Kwai's entire flow broker-owned; a
+  background-task/poll/cancel connect flow with a live progress dialog; periodic token-refresh sweep reusing the
+  existing `JobRunner`; identity-uniqueness enforced at both the application layer and the database; a real
+  Settings → Integrations screen and real per-platform connection state on the Channels/Queue/Dashboard screens.
+  OS-native secure storage (Keychain / Credential Manager) now holds real YouTube credentials; TikTok/Kwai tokens
+  never leave the Auth Broker's own encrypted SQLite.
 - Structured logging to a local JSON log file
 - A complete, customized UI component library (not default shadcn) and design token system, including a themed
   confirmation dialog (`confirmAction()`) replacing every native `window.confirm()`
@@ -220,12 +253,18 @@ write-up; the essentials:
   placeholders for Comments/Analytics/Automation
 - Command palette, notification center, collapsible sidebar, dark theme (polished) / light theme (structural)
 
-**Deliberately not implemented yet** (see `docs/architecture.md` and `docs/scheduler.md` for what each needs before
-it can land):
+**Deliberately not implemented yet** (see `docs/architecture.md`, `docs/scheduler.md` and
+`docs/platform-authentication.md` for what each needs before it can land):
 
-- Real YouTube/TikTok/Kwai API integration, OAuth, actually publishing anywhere, or metrics/comment sync — a
-  publication can be scheduled all the way to "this UTC instant is booked," and a due-publication query already
-  exists for a future uploader to consume, but nothing calls a platform API
+- Real video publishing/uploads, comments fetch/reply, or full social analytics ingestion — a publication can be
+  scheduled all the way to "this UTC instant is booked" and its channel can carry a real, connected account with
+  read-level capabilities, and a due-publication query already exists for a future uploader to consume, but nothing
+  calls a platform's publish API yet. `PlatformConnector`'s publishing methods exist as a typed `NotImplemented`
+  seam specifically so this doesn't require touching `domain`/`commands` to fill in.
+- No live YouTube/TikTok/Kwai developer credentials were available while building Phase 4 — every OAuth code path
+  was verified against fakes/mocks (desktop) or `wiremock` (broker), never a live provider. "Implementation
+  complete" is not the same claim as "provider-approved for production publishing" — see
+  `docs/provider-capabilities.md`.
 - Video transcoding (FFmpeg detection and thumbnail extraction exist; re-encoding does not)
 - Bundled FFmpeg/FFprobe binaries in packaged builds (the sidecar-resolution logic exists; nothing is bundled)
 - Background/async triggering of auto-schedule/rebuild/fill-gaps (the job-type vocabulary exists; nothing enqueues it
