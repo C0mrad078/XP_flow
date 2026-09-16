@@ -219,7 +219,7 @@ impl PublicationRepository for SqlitePublicationRepository {
             };
         let result = sqlx::query(
             "UPDATE publications SET status = ?, remote_id = ?, retry_count = ?, last_error = ?, \
-             rendered_metadata_json = ?, claim_token = ?, lease_expires_at = ?, updated_at = ? \
+             rendered_metadata_json = ?, claim_token = ?, lease_expires_at = ?, published_at = COALESCE(?, published_at), updated_at = ? \
              WHERE id = ? AND claim_token = ?",
         )
         .bind(update.status.as_str())
@@ -229,9 +229,35 @@ impl PublicationRepository for SqlitePublicationRepository {
         .bind(&update.rendered_metadata_json)
         .bind(new_claim_token)
         .bind(new_lease_expires_at)
+        .bind(update.published_at.map(|dt| dt.to_rfc3339()))
         .bind(Utc::now().to_rfc3339())
         .bind(id.to_string())
         .bind(claim_token)
+        .execute(&self.pool)
+        .await
+        .map_err(map_repo_err)?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn try_finish_processing(
+        &self,
+        id: Uuid,
+        status: PublicationStatus,
+        remote_id: Option<String>,
+        last_error: Option<String>,
+        published_at: Option<DateTime<Utc>>,
+    ) -> DomainResult<bool> {
+        let result = sqlx::query(
+            "UPDATE publications SET status = ?, remote_id = COALESCE(?, remote_id), last_error = ?, \
+             published_at = COALESCE(?, published_at), claim_token = NULL, lease_expires_at = NULL, updated_at = ? \
+             WHERE id = ? AND status = 'processing'",
+        )
+        .bind(status.as_str())
+        .bind(remote_id)
+        .bind(last_error)
+        .bind(published_at.map(|dt| dt.to_rfc3339()))
+        .bind(Utc::now().to_rfc3339())
+        .bind(id.to_string())
         .execute(&self.pool)
         .await
         .map_err(map_repo_err)?;
@@ -728,6 +754,7 @@ mod tests {
                 rendered_metadata_json: None,
                 release_claim: true,
                 new_lease_expires_at: None,
+                published_at: None,
             },
         )
         .await
@@ -822,6 +849,7 @@ mod tests {
             rendered_metadata_json: None,
             release_claim: false,
             new_lease_expires_at: Some(Utc::now() + chrono::Duration::minutes(45)),
+            published_at: None,
         };
 
         // A stale/wrong token must be rejected, not silently applied.
@@ -888,5 +916,81 @@ mod tests {
             "the concurrently-made claim's status must survive the rejected update"
         );
         assert_eq!(reloaded.claim_token.as_deref(), Some("active-claim"));
+    }
+
+    #[tokio::test]
+    async fn try_finish_processing_only_applies_to_a_processing_row() {
+        let pool = temp_pool("pub-repo-finish-processing").await;
+        let (workspace_id, source_id) = seed_workspace_and_source(&pool).await;
+        let channel_id = seed_channel(&pool, workspace_id, "Channel").await;
+        let video_id = seed_video(&pool, workspace_id, source_id, Some(channel_id), "video").await;
+        let publication =
+            seed_scheduled_publication(&pool, workspace_id, channel_id, video_id, Utc::now()).await;
+        let repo = SqlitePublicationRepository::new(pool.clone());
+
+        // Not Processing yet — must be rejected.
+        let rejected = repo
+            .try_finish_processing(
+                publication.id,
+                PublicationStatus::Published,
+                None,
+                None,
+                Some(Utc::now()),
+            )
+            .await
+            .unwrap();
+        assert!(!rejected);
+
+        repo.try_claim_due(
+            publication.id,
+            Uuid::new_v4(),
+            "claim-1",
+            Utc::now() + chrono::Duration::minutes(30),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+        repo.update_execution_state(
+            publication.id,
+            "claim-1",
+            &crate::domain::ports::repositories::ExecutionStateUpdate {
+                status: PublicationStatus::Processing,
+                remote_id: Some("remote-processing-1".to_string()),
+                retry_count: 0,
+                last_error: None,
+                rendered_metadata_json: None,
+                release_claim: true,
+                new_lease_expires_at: None,
+                published_at: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let now = Utc::now();
+        let first = repo
+            .try_finish_processing(
+                publication.id,
+                PublicationStatus::Published,
+                None,
+                None,
+                Some(now),
+            )
+            .await
+            .unwrap();
+        assert!(first);
+        let reloaded = repo.get(publication.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.status, PublicationStatus::Published);
+        assert_eq!(reloaded.remote_id.as_deref(), Some("remote-processing-1"));
+        assert!(reloaded.published_at.is_some());
+
+        // A second, redundant poll result must be a harmless no-op.
+        let second = repo
+            .try_finish_processing(publication.id, PublicationStatus::Failed, None, None, None)
+            .await
+            .unwrap();
+        assert!(!second);
+        let unchanged = repo.get(publication.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.status, PublicationStatus::Published);
     }
 }

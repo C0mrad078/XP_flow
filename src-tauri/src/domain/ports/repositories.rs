@@ -155,6 +155,11 @@ pub struct ExecutionStateUpdate {
     pub rendered_metadata_json: Option<String>,
     pub release_claim: bool,
     pub new_lease_expires_at: Option<DateTime<Utc>>,
+    /// Stamped when `status` transitions to `Published` — `None` for
+    /// every other transition (including retries, so a previous
+    /// publish_at from a *different* execution lineage is never carried
+    /// forward by accident).
+    pub published_at: Option<DateTime<Utc>>,
 }
 
 #[async_trait]
@@ -186,6 +191,25 @@ pub trait PublicationRepository: Send + Sync {
         id: Uuid,
         claim_token: &str,
         update: &ExecutionStateUpdate,
+    ) -> DomainResult<bool>;
+
+    /// Resolves a `Processing` publication to its terminal outcome once
+    /// remote processing finishes (section 45/62), guarded on the row
+    /// still being `Processing` rather than on a claim token — polling is
+    /// a read-heavy, idempotent operation (repeated `GET`s are harmless),
+    /// so it doesn't need the same exclusive-claim machinery uploading
+    /// does. `status` itself is the coordination point here, the same
+    /// way `update()`'s `NOT IN ('uploading', 'processing')` guard
+    /// already uses it: whichever poll call gets there first wins, and
+    /// every later one simply affects zero rows instead of double-
+    /// applying a result.
+    async fn try_finish_processing(
+        &self,
+        id: Uuid,
+        status: crate::domain::publication::PublicationStatus,
+        remote_id: Option<String>,
+        last_error: Option<String>,
+        published_at: Option<DateTime<Utc>>,
     ) -> DomainResult<bool>;
     /// Persists every publication in `publications` inside a single
     /// database transaction — all-or-nothing. Used by bulk scheduling

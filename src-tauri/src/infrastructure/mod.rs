@@ -8,5 +8,6 @@ pub mod filesystem;
 pub mod hashing;
 pub mod logging;
 pub mod media;
+pub mod publishing;
 pub mod repositories;
 pub mod watcher;
