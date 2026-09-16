@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::application::activity_service::ActivityService;
 use crate::application::channel_service::ChannelService;
 use crate::application::content_service::ContentService;
+use crate::application::metadata_template_service::MetadataTemplateService;
 use crate::application::platform_account_service::PlatformAccountService;
 use crate::application::platform_auth_service::PlatformAuthService;
 use crate::application::publication_service::PublicationService;
@@ -46,6 +47,7 @@ pub struct AppState {
     pub platform_auth_service: Arc<PlatformAuthService>,
     pub token_lifecycle_service: Arc<TokenLifecycleService>,
     pub publishing_engine_service: Arc<PublishingEngineService>,
+    pub metadata_template_service: Arc<MetadataTemplateService>,
     pub publishing_readiness_service: Arc<PublishingReadinessService>,
     pub job_runner: Arc<JobRunner>,
     pub video_repo: Arc<dyn VideoRepository>,

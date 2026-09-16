@@ -7,6 +7,7 @@ pub mod channel_service;
 pub mod content_service;
 pub mod credential_acquisition_service;
 pub mod media_ingestion_service;
+pub mod metadata_template_service;
 pub mod platform_account_service;
 pub mod platform_auth_service;
 pub mod publication_service;

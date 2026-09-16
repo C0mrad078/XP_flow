@@ -11,7 +11,8 @@ pub use consent::{
     hash_publication_metadata, requires_express_consent, ApprovalSource, PublicationConsent,
 };
 pub use metadata::{
-    render_template, HashtagSet, MetadataTemplate, TemplateKind, TemplateVariables,
+    classify_metadata_issue, render_template, HashtagSet, MetadataTemplate,
+    MetadataValidationIssue, MetadataValidationIssueCode, TemplateKind, TemplateVariables,
 };
 pub use publish_error::PublishError;
 pub use remote_state::RemoteUploadState;

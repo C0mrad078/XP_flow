@@ -98,6 +98,7 @@ pub struct PublishingEngineService {
     consent_repo: Arc<dyn PublicationConsentRepository>,
     content_hash_service: Arc<dyn ContentHashService>,
     credential_service: Arc<CredentialAcquisitionService>,
+    metadata_service: Arc<crate::application::metadata_template_service::MetadataTemplateService>,
     publishers: HashMap<Platform, Arc<dyn PlatformPublisher>>,
     activity_service: Arc<ActivityService>,
     notification_service: Arc<NotificationService>,
@@ -115,6 +116,9 @@ impl PublishingEngineService {
         consent_repo: Arc<dyn PublicationConsentRepository>,
         content_hash_service: Arc<dyn ContentHashService>,
         credential_service: Arc<CredentialAcquisitionService>,
+        metadata_service: Arc<
+            crate::application::metadata_template_service::MetadataTemplateService,
+        >,
         publishers: HashMap<Platform, Arc<dyn PlatformPublisher>>,
         activity_service: Arc<ActivityService>,
         notification_service: Arc<NotificationService>,
@@ -129,6 +133,7 @@ impl PublishingEngineService {
             consent_repo,
             content_hash_service,
             credential_service,
+            metadata_service,
             publishers,
             activity_service,
             notification_service,
@@ -293,12 +298,13 @@ impl PublishingEngineService {
                 detail: "publication not found".to_string(),
             })?;
 
-        let metadata = RenderedMetadata {
-            title: publication.title.clone(),
-            description: publication.description.clone().unwrap_or_default(),
-            hashtags: publication.hashtags.clone(),
-            provider_options: serde_json::json!({}),
-        };
+        let metadata = self
+            .metadata_service
+            .render_for_publication(&publication)
+            .await
+            .map_err(|e| PublishError::Internal {
+                detail: e.to_string(),
+            })?;
         let consent = crate::domain::publishing::PublicationConsent::new(
             publication_id,
             publication.platform,
@@ -399,16 +405,32 @@ impl PublishingEngineService {
             })?
             .clone();
 
-        // Section 22/29: rendered from the publication's own fields for
-        // now — the full template-precedence engine
-        // (`MetadataTemplateService`) composes these same fields before
-        // scheduling; the engine only ever freezes and sends whatever is
-        // already on the row at execution time (section 103).
-        let metadata = RenderedMetadata {
-            title: publication.title.clone(),
-            description: publication.description.clone().unwrap_or_default(),
-            hashtags: publication.hashtags.clone(),
-            provider_options: serde_json::json!({}),
+        // Section 22/29/103: resolved through the real precedence ladder
+        // (`MetadataTemplateService::render_for_publication`) — the exact
+        // same resolution a live preview shows is what gets frozen the
+        // moment execution starts, never a second, subtly different
+        // inline computation. Routed through `fail_and_release` on error,
+        // same as every other pre-flight check here — a resolution
+        // failure (e.g. the underlying video/channel row vanished) must
+        // still release the claim, never leave it stuck `Uploading`.
+        let metadata = match self
+            .metadata_service
+            .render_for_publication(&publication)
+            .await
+        {
+            Ok(metadata) => metadata,
+            Err(e) => {
+                return self
+                    .fail_and_release(
+                        &publication,
+                        claim_token,
+                        PublishError::Internal {
+                            detail: e.to_string(),
+                        },
+                        0,
+                    )
+                    .await
+            }
         };
 
         if let Err(err) = publisher.validate_metadata(&metadata) {
@@ -1117,6 +1139,31 @@ mod tests {
             Arc::new(FakePublisher::new(Platform::TikTok, scenario)),
         );
 
+        let metadata_service = Arc::new(
+            crate::application::metadata_template_service::MetadataTemplateService::new(
+                Arc::new(
+                    crate::infrastructure::repositories::SqliteMetadataTemplateRepository::new(
+                        pool.clone(),
+                    ),
+                ),
+                Arc::new(
+                    crate::infrastructure::repositories::SqliteHashtagSetRepository::new(
+                        pool.clone(),
+                    ),
+                ),
+                publication_repo.clone() as Arc<dyn PublicationRepository>,
+                video_repo.clone() as Arc<dyn VideoRepository>,
+                Arc::new(
+                    crate::infrastructure::repositories::SqliteVideoSourceRepository::new(
+                        pool.clone(),
+                    ),
+                )
+                    as Arc<dyn crate::domain::ports::repositories::VideoSourceRepository>,
+                channel_repo.clone() as Arc<dyn ChannelRepository>,
+                publishers.clone(),
+            ),
+        );
+
         let engine = PublishingEngineService::new(
             publication_repo.clone() as Arc<dyn PublicationRepository>,
             attempt_repo.clone() as Arc<dyn PublicationAttemptRepository>,
@@ -1128,6 +1175,7 @@ mod tests {
                 as Arc<dyn PublicationConsentRepository>,
             Arc::new(Sha256ContentHashService),
             credential_service,
+            metadata_service,
             publishers,
             activity_service,
             notification_service,

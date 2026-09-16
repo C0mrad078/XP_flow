@@ -131,6 +131,38 @@ impl std::str::FromStr for PublicationStatus {
     }
 }
 
+/// Per-field metadata resolution controls (Phase 5.1 section 5/40) layered
+/// on top of a publication's own raw `title`/`description`/`hashtags` —
+/// the lowest-precedence "Video / Publication Raw Fields" rung of the
+/// ladder documented in `docs/metadata-templates.md`. Every field defaults
+/// to `None`, meaning "resolve automatically through the channel/workspace
+/// template precedence chain" — nothing here changes behavior for a
+/// publication that has never touched the metadata template system.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MetadataOverrides {
+    /// Literal text for this one publication (still rendered through
+    /// `{variables}`), taking precedence over every template — the
+    /// "Publication Override" rung.
+    pub title_override: Option<String>,
+    pub description_override: Option<String>,
+    /// Literal hashtag list for this one publication.
+    pub hashtags_override: Option<Vec<String>>,
+    /// Pins resolution to one specific template rather than letting the
+    /// channel/workspace precedence chain pick ("Select specific
+    /// template" in the editor). Cleared automatically (`ON DELETE SET
+    /// NULL`) if that template is ever deleted — resolution then falls
+    /// through to the next rung, never a dangling reference.
+    pub title_template_id: Option<Uuid>,
+    pub description_template_id: Option<Uuid>,
+    pub hashtag_set_id: Option<Uuid>,
+    /// Provider-specific option overrides (YouTube privacy/category,
+    /// TikTok privacy_level/duet/stitch/comment toggles, Kwai cover/
+    /// caption) as a JSON object — opaque here, interpreted only by each
+    /// `PlatformPublisher`, same discipline as
+    /// `RenderedMetadata::provider_options`.
+    pub provider_options_override: Option<serde_json::Value>,
+}
+
 /// A single platform-specific publication of a [`super::video::Video`].
 ///
 /// A video may fan out into several publications — one per platform — and
@@ -177,6 +209,9 @@ pub struct Publication {
     /// edit can never retroactively change what an in-flight or already-
     /// executed attempt claims it sent.
     pub rendered_metadata: Option<crate::domain::publishing::RenderedMetadata>,
+    /// Phase 5.1 — per-field metadata resolution controls; see
+    /// [`MetadataOverrides`].
+    pub metadata_overrides: MetadataOverrides,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -213,6 +248,7 @@ impl Publication {
             claim_token: None,
             lease_expires_at: None,
             rendered_metadata: None,
+            metadata_overrides: MetadataOverrides::default(),
             created_at: now,
             updated_at: now,
         }

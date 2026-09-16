@@ -4,6 +4,59 @@ use uuid::Uuid;
 
 use crate::domain::platform::Platform;
 
+/// A typed reason the rendered result of a metadata resolution failed a
+/// provider's own validation (Phase 5.1 section 14) — the frontend
+/// switches on `code`, never parses `message` text, mirroring how
+/// `AppError`/`PublishError` already separate a typed code from a
+/// human-readable string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum MetadataValidationIssueCode {
+    TitleTooLong,
+    DescriptionTooLong,
+    CaptionTooLong,
+    MissingRequiredField,
+    InvalidProviderOption,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetadataValidationIssue {
+    pub code: MetadataValidationIssueCode,
+    pub message: String,
+}
+
+/// Classifies a `PublishError::InvalidMetadata` detail string into a
+/// typed code (section 14: "do not duplicate provider validation rules
+/// in React" — the rules stay exactly where they already lived, inside
+/// each `PlatformPublisher::validate_metadata`; this only classifies
+/// *which* rule fired, via best-effort substring matching on the message
+/// each check already produces, same discipline already established for
+/// classifying Kwai's free-text provider errors).
+pub fn classify_metadata_issue(detail: &str) -> MetadataValidationIssue {
+    let lower = detail.to_lowercase();
+    let code = if lower.contains("caption") {
+        if lower.contains("empty") {
+            MetadataValidationIssueCode::MissingRequiredField
+        } else {
+            MetadataValidationIssueCode::CaptionTooLong
+        }
+    } else if lower.contains("title") {
+        if lower.contains("empty") {
+            MetadataValidationIssueCode::MissingRequiredField
+        } else {
+            MetadataValidationIssueCode::TitleTooLong
+        }
+    } else if lower.contains("description") {
+        MetadataValidationIssueCode::DescriptionTooLong
+    } else {
+        MetadataValidationIssueCode::InvalidProviderOption
+    };
+    MetadataValidationIssue {
+        code,
+        message: detail.to_string(),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TemplateKind {
@@ -123,7 +176,13 @@ impl HashtagSet {
 /// here, not invented ad hoc at a call site.
 #[derive(Debug, Clone, Default)]
 pub struct TemplateVariables {
+    /// The *publication's* own title — independently editable from the
+    /// underlying video (section 7 of the Phase 5.1 brief).
     pub title: String,
+    /// The underlying `Video.display_title` — distinct from `title` above
+    /// so a template can reference "what this clip is called" even when
+    /// the publication's own title has been customized.
+    pub video_title: String,
     pub source: String,
     pub channel: String,
     pub filename: String,
@@ -141,6 +200,7 @@ pub struct TemplateVariables {
 pub fn render_template(template_text: &str, vars: &TemplateVariables) -> String {
     template_text
         .replace("{title}", &vars.title)
+        .replace("{video_title}", &vars.video_title)
         .replace("{source}", &vars.source)
         .replace("{channel}", &vars.channel)
         .replace("{filename}", &vars.filename)
@@ -156,6 +216,7 @@ mod tests {
     fn sample_vars() -> TemplateVariables {
         TemplateVariables {
             title: "Amazing Goal".to_string(),
+            video_title: "raw_export_042".to_string(),
             source: "cutpro-export".to_string(),
             channel: "Football BR".to_string(),
             filename: "goal_042.mp4".to_string(),
@@ -163,6 +224,12 @@ mod tests {
             platform: "YouTube".to_string(),
             hashtags: "#futebol #shorts".to_string(),
         }
+    }
+
+    #[test]
+    fn video_title_is_distinct_from_the_publications_own_title() {
+        let rendered = render_template("{title} (source: {video_title})", &sample_vars());
+        assert_eq!(rendered, "Amazing Goal (source: raw_export_042)");
     }
 
     #[test]
@@ -187,5 +254,37 @@ mod tests {
     fn a_template_with_no_placeholders_passes_through_unchanged() {
         let rendered = render_template("Static caption, no variables here.", &sample_vars());
         assert_eq!(rendered, "Static caption, no variables here.");
+    }
+
+    #[test]
+    fn classifies_known_length_and_emptiness_messages() {
+        assert_eq!(
+            classify_metadata_issue("title exceeds YouTube's 100-character limit").code,
+            MetadataValidationIssueCode::TitleTooLong
+        );
+        assert_eq!(
+            classify_metadata_issue("title cannot be empty").code,
+            MetadataValidationIssueCode::MissingRequiredField
+        );
+        assert_eq!(
+            classify_metadata_issue("caption exceeds TikTok's 2200-character limit").code,
+            MetadataValidationIssueCode::CaptionTooLong
+        );
+        assert_eq!(
+            classify_metadata_issue("caption cannot be empty").code,
+            MetadataValidationIssueCode::MissingRequiredField
+        );
+        assert_eq!(
+            classify_metadata_issue("description exceeds YouTube's 5000-character limit").code,
+            MetadataValidationIssueCode::DescriptionTooLong
+        );
+    }
+
+    #[test]
+    fn an_unrecognized_message_falls_back_to_invalid_provider_option() {
+        assert_eq!(
+            classify_metadata_issue("something provider-specific went wrong").code,
+            MetadataValidationIssueCode::InvalidProviderOption
+        );
     }
 }

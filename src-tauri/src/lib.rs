@@ -19,6 +19,7 @@ use application::channel_service::ChannelService;
 use application::content_service::ContentService;
 use application::credential_acquisition_service::CredentialAcquisitionService;
 use application::media_ingestion_service::MediaIngestionService;
+use application::metadata_template_service::MetadataTemplateService;
 use application::platform_account_service::PlatformAccountService;
 use application::platform_auth_service::PlatformAuthService;
 use application::publication_service::PublicationService;
@@ -60,7 +61,8 @@ use infrastructure::media::{FfmpegMediaService, FfmpegThumbnailService, FfprobeM
 use infrastructure::publishing::StubPublisher;
 use infrastructure::repositories::{
     SqliteActivityRepository, SqliteChannelRepository, SqliteDuplicateMatchRepository,
-    SqliteJobRepository, SqliteNotificationRepository, SqlitePlatformAccountRepository,
+    SqliteHashtagSetRepository, SqliteJobRepository, SqliteMetadataTemplateRepository,
+    SqliteNotificationRepository, SqlitePlatformAccountRepository,
     SqlitePublicationAttemptRepository, SqlitePublicationConsentRepository,
     SqlitePublicationRepository, SqliteQueueItemRepository, SqliteScheduleExceptionRepository,
     SqliteScheduleSlotRepository, SqliteSettingsRepository, SqliteUploadSessionRepository,
@@ -485,6 +487,15 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         },
     );
     let publication_consent_repo = Arc::new(SqlitePublicationConsentRepository::new(pool.clone()));
+    let metadata_template_service = Arc::new(MetadataTemplateService::new(
+        Arc::new(SqliteMetadataTemplateRepository::new(pool.clone())),
+        Arc::new(SqliteHashtagSetRepository::new(pool.clone())),
+        publication_repo.clone(),
+        video_repo.clone(),
+        source_repo.clone(),
+        channel_repo.clone(),
+        publishers.clone(),
+    ));
     let publishing_engine_service = Arc::new(PublishingEngineService::new(
         publication_repo.clone(),
         publication_attempt_repo,
@@ -495,6 +506,7 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         publication_consent_repo.clone(),
         hash_service.clone(),
         credential_service,
+        metadata_template_service.clone(),
         publishers.clone(),
         activity_service.clone(),
         notification_service.clone(),
@@ -628,6 +640,7 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         token_lifecycle_service,
         publishing_engine_service,
         publishing_readiness_service,
+        metadata_template_service,
         job_runner,
         video_repo,
         paths,

@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::platform::Platform;
 use crate::domain::ports::repositories::PublicationRepository;
-use crate::domain::publication::{Publication, PublicationStatus};
+use crate::domain::publication::{MetadataOverrides, Publication, PublicationStatus};
 use crate::domain::publication_query::{PublicationListQuery, PublicationPage, QueueSort};
 use crate::domain::video_status::VideoPriority;
 
@@ -37,6 +37,27 @@ fn row_to_publication(row: &sqlx::sqlite::SqliteRow) -> Result<Publication, Doma
     let rendered_metadata_json: Option<String> = row
         .try_get("rendered_metadata_json")
         .map_err(map_repo_err)?;
+    let title_template_id: Option<String> =
+        row.try_get("title_template_id").map_err(map_repo_err)?;
+    let description_template_id: Option<String> = row
+        .try_get("description_template_id")
+        .map_err(map_repo_err)?;
+    let hashtag_set_id: Option<String> = row.try_get("hashtag_set_id").map_err(map_repo_err)?;
+    let hashtags_override_json: Option<String> =
+        row.try_get("hashtags_override").map_err(map_repo_err)?;
+    let provider_options_override_json: Option<String> = row
+        .try_get("provider_options_override")
+        .map_err(map_repo_err)?;
+    let metadata_overrides = MetadataOverrides {
+        title_override: row.try_get("title_override").map_err(map_repo_err)?,
+        description_override: row.try_get("description_override").map_err(map_repo_err)?,
+        hashtags_override: hashtags_override_json.and_then(|json| serde_json::from_str(&json).ok()),
+        title_template_id: title_template_id.and_then(|s| Uuid::parse_str(&s).ok()),
+        description_template_id: description_template_id.and_then(|s| Uuid::parse_str(&s).ok()),
+        hashtag_set_id: hashtag_set_id.and_then(|s| Uuid::parse_str(&s).ok()),
+        provider_options_override: provider_options_override_json
+            .and_then(|json| serde_json::from_str(&json).ok()),
+    };
 
     Ok(Publication {
         id: Uuid::parse_str(&row.try_get::<String, _>("id").map_err(map_repo_err)?)
@@ -82,6 +103,7 @@ fn row_to_publication(row: &sqlx::sqlite::SqliteRow) -> Result<Publication, Doma
         claim_token: row.try_get("claim_token").map_err(map_repo_err)?,
         lease_expires_at: lease_expires_at.map(|s| parse_dt(&s)),
         rendered_metadata: rendered_metadata_json.and_then(|json| serde_json::from_str(&json).ok()),
+        metadata_overrides,
         created_at: parse_dt(
             &row.try_get::<String, _>("created_at")
                 .map_err(map_repo_err)?,
@@ -95,7 +117,9 @@ fn row_to_publication(row: &sqlx::sqlite::SqliteRow) -> Result<Publication, Doma
 
 const SELECT_COLUMNS: &str = "id, workspace_id, video_id, channel_id, platform_account_id, platform, status, title, \
      description, hashtags_json, priority, locked, scheduled_at, published_at, remote_id, retry_count, last_error, \
-     execution_key, claim_token, lease_expires_at, rendered_metadata_json, created_at, updated_at";
+     execution_key, claim_token, lease_expires_at, rendered_metadata_json, title_override, description_override, \
+     hashtags_override, title_template_id, description_template_id, hashtag_set_id, provider_options_override, \
+     created_at, updated_at";
 
 #[async_trait]
 impl PublicationRepository for SqlitePublicationRepository {
@@ -103,8 +127,10 @@ impl PublicationRepository for SqlitePublicationRepository {
         sqlx::query(
             "INSERT INTO publications (id, workspace_id, video_id, channel_id, platform_account_id, platform, status, title, \
              description, hashtags_json, priority, locked, scheduled_at, published_at, remote_id, retry_count, last_error, \
-             execution_key, claim_token, lease_expires_at, rendered_metadata_json, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             execution_key, claim_token, lease_expires_at, rendered_metadata_json, title_override, description_override, \
+             hashtags_override, title_template_id, description_template_id, hashtag_set_id, provider_options_override, \
+             created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(publication.id.to_string())
         .bind(publication.workspace_id.to_string())
@@ -131,6 +157,40 @@ impl PublicationRepository for SqlitePublicationRepository {
                 .rendered_metadata
                 .as_ref()
                 .map(|m| serde_json::to_string(m).unwrap_or_default()),
+        )
+        .bind(&publication.metadata_overrides.title_override)
+        .bind(&publication.metadata_overrides.description_override)
+        .bind(
+            publication
+                .metadata_overrides
+                .hashtags_override
+                .as_ref()
+                .map(|tags| serde_json::to_string(tags).unwrap_or_default()),
+        )
+        .bind(
+            publication
+                .metadata_overrides
+                .title_template_id
+                .map(|id| id.to_string()),
+        )
+        .bind(
+            publication
+                .metadata_overrides
+                .description_template_id
+                .map(|id| id.to_string()),
+        )
+        .bind(
+            publication
+                .metadata_overrides
+                .hashtag_set_id
+                .map(|id| id.to_string()),
+        )
+        .bind(
+            publication
+                .metadata_overrides
+                .provider_options_override
+                .as_ref()
+                .map(|v| v.to_string()),
         )
         .bind(publication.created_at.to_rfc3339())
         .bind(publication.updated_at.to_rfc3339())
@@ -168,6 +228,8 @@ impl PublicationRepository for SqlitePublicationRepository {
         let result = sqlx::query(
             "UPDATE publications SET platform_account_id = ?, status = ?, title = ?, description = ?, hashtags_json = ?, \
              priority = ?, locked = ?, scheduled_at = ?, published_at = ?, remote_id = ?, retry_count = ?, last_error = ?, \
+             title_override = ?, description_override = ?, hashtags_override = ?, title_template_id = ?, \
+             description_template_id = ?, hashtag_set_id = ?, provider_options_override = ?, \
              updated_at = ? \
              WHERE id = ? AND status NOT IN ('uploading', 'processing')",
         )
@@ -183,6 +245,40 @@ impl PublicationRepository for SqlitePublicationRepository {
         .bind(&publication.remote_id)
         .bind(publication.retry_count)
         .bind(&publication.last_error)
+        .bind(&publication.metadata_overrides.title_override)
+        .bind(&publication.metadata_overrides.description_override)
+        .bind(
+            publication
+                .metadata_overrides
+                .hashtags_override
+                .as_ref()
+                .map(|tags| serde_json::to_string(tags).unwrap_or_default()),
+        )
+        .bind(
+            publication
+                .metadata_overrides
+                .title_template_id
+                .map(|id| id.to_string()),
+        )
+        .bind(
+            publication
+                .metadata_overrides
+                .description_template_id
+                .map(|id| id.to_string()),
+        )
+        .bind(
+            publication
+                .metadata_overrides
+                .hashtag_set_id
+                .map(|id| id.to_string()),
+        )
+        .bind(
+            publication
+                .metadata_overrides
+                .provider_options_override
+                .as_ref()
+                .map(|v| v.to_string()),
+        )
         .bind(publication.updated_at.to_rfc3339())
         .bind(publication.id.to_string())
         .execute(&self.pool)
@@ -992,5 +1088,109 @@ mod tests {
         assert!(!second);
         let unchanged = repo.get(publication.id).await.unwrap().unwrap();
         assert_eq!(unchanged.status, PublicationStatus::Published);
+    }
+
+    #[tokio::test]
+    async fn metadata_overrides_round_trip_through_create_and_update() {
+        let pool = temp_pool("pub-repo-overrides").await;
+        let (workspace_id, source_id) = seed_workspace_and_source(&pool).await;
+        let channel_id = seed_channel(&pool, workspace_id, "Channel").await;
+        let video_id = seed_video(&pool, workspace_id, source_id, Some(channel_id), "video").await;
+        let repo = SqlitePublicationRepository::new(pool.clone());
+
+        let mut publication = Publication::new(
+            workspace_id,
+            video_id,
+            channel_id,
+            Platform::TikTok,
+            "Raw title",
+            VideoPriority::Normal,
+        );
+        publication.metadata_overrides.title_override = Some("Custom title {channel}".to_string());
+        publication.metadata_overrides.hashtags_override =
+            Some(vec!["#a".to_string(), "#b".to_string()]);
+        let title_template_id = Uuid::new_v4();
+        publication.metadata_overrides.title_template_id = None; // no FK target yet in this test
+        publication.metadata_overrides.provider_options_override =
+            Some(serde_json::json!({ "privacy_level": "SELF_ONLY" }));
+        repo.create(&publication).await.unwrap();
+
+        let reloaded = repo.get(publication.id).await.unwrap().unwrap();
+        assert_eq!(
+            reloaded.metadata_overrides.title_override.as_deref(),
+            Some("Custom title {channel}")
+        );
+        assert_eq!(
+            reloaded.metadata_overrides.hashtags_override,
+            Some(vec!["#a".to_string(), "#b".to_string()])
+        );
+        assert_eq!(
+            reloaded.metadata_overrides.provider_options_override,
+            Some(serde_json::json!({ "privacy_level": "SELF_ONLY" }))
+        );
+        assert!(reloaded.metadata_overrides.title_template_id.is_none());
+        let _ = title_template_id;
+
+        let mut to_update = reloaded;
+        to_update.metadata_overrides.title_override = None;
+        to_update.metadata_overrides.description_override = Some("New description".to_string());
+        repo.update(&to_update).await.unwrap();
+
+        let reloaded_again = repo.get(publication.id).await.unwrap().unwrap();
+        assert!(reloaded_again.metadata_overrides.title_override.is_none());
+        assert_eq!(
+            reloaded_again
+                .metadata_overrides
+                .description_override
+                .as_deref(),
+            Some("New description")
+        );
+        // Untouched by the update — still round-tripped from the first write.
+        assert_eq!(
+            reloaded_again.metadata_overrides.hashtags_override,
+            Some(vec!["#a".to_string(), "#b".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_referenced_metadata_template_clears_the_publications_pin() {
+        let pool = temp_pool("pub-repo-template-fk").await;
+        let (workspace_id, source_id) = seed_workspace_and_source(&pool).await;
+        let channel_id = seed_channel(&pool, workspace_id, "Channel").await;
+        let video_id = seed_video(&pool, workspace_id, source_id, Some(channel_id), "video").await;
+        let repo = SqlitePublicationRepository::new(pool.clone());
+
+        let template = crate::domain::publishing::MetadataTemplate::new(
+            workspace_id,
+            None,
+            None,
+            crate::domain::publishing::TemplateKind::Title,
+            "{title}",
+        );
+        let template_repo =
+            crate::infrastructure::repositories::SqliteMetadataTemplateRepository::new(
+                pool.clone(),
+            );
+        use crate::domain::ports::repositories::MetadataTemplateRepository;
+        template_repo.create(&template).await.unwrap();
+
+        let mut publication = Publication::new(
+            workspace_id,
+            video_id,
+            channel_id,
+            Platform::YouTube,
+            "Raw title",
+            VideoPriority::Normal,
+        );
+        publication.metadata_overrides.title_template_id = Some(template.id);
+        repo.create(&publication).await.unwrap();
+
+        template_repo.delete(template.id).await.unwrap();
+
+        let reloaded = repo.get(publication.id).await.unwrap().unwrap();
+        assert!(
+            reloaded.metadata_overrides.title_template_id.is_none(),
+            "ON DELETE SET NULL should have cleared the dangling pin"
+        );
     }
 }
