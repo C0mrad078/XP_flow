@@ -11,6 +11,7 @@ pub mod platform_account_service;
 pub mod platform_auth_service;
 pub mod publication_service;
 pub mod publishing_engine_service;
+pub mod publishing_readiness_service;
 pub mod schedule_slot_service;
 pub mod scheduler_service;
 pub mod settings_service;

@@ -7,7 +7,9 @@ pub mod retry_policy;
 pub mod upload_session;
 
 pub use attempt::{AttemptStatus, PublicationAttempt};
-pub use consent::{hash_publication_metadata, ApprovalSource, PublicationConsent};
+pub use consent::{
+    hash_publication_metadata, requires_express_consent, ApprovalSource, PublicationConsent,
+};
 pub use metadata::{
     render_template, HashtagSet, MetadataTemplate, TemplateKind, TemplateVariables,
 };

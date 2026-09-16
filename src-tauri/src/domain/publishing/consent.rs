@@ -96,6 +96,16 @@ impl PublicationConsent {
     }
 }
 
+/// Section 31: only TikTok's Content Posting API requires XP FLOW to
+/// prove explicit per-publication approval before transmitting. YouTube
+/// and Kwai have no equivalent express-consent requirement in their
+/// documented publishing flows. Shared by the engine (the hard gate) and
+/// the readiness service (the surfaced-before-scheduling signal) so the
+/// two never drift apart on which platforms this applies to.
+pub fn requires_express_consent(platform: Platform) -> bool {
+    platform == Platform::TikTok
+}
+
 /// A stable, order-independent hash of everything a consent approval
 /// actually needs to cover: the rendered text plus every provider option
 /// that changes what gets posted (section 33's examples — privacy,

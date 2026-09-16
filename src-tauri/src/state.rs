@@ -7,6 +7,7 @@ use crate::application::platform_account_service::PlatformAccountService;
 use crate::application::platform_auth_service::PlatformAuthService;
 use crate::application::publication_service::PublicationService;
 use crate::application::publishing_engine_service::PublishingEngineService;
+use crate::application::publishing_readiness_service::PublishingReadinessService;
 use crate::application::schedule_slot_service::ScheduleSlotService;
 use crate::application::scheduler_service::SchedulerService;
 use crate::application::settings_service::SettingsService;
@@ -45,6 +46,7 @@ pub struct AppState {
     pub platform_auth_service: Arc<PlatformAuthService>,
     pub token_lifecycle_service: Arc<TokenLifecycleService>,
     pub publishing_engine_service: Arc<PublishingEngineService>,
+    pub publishing_readiness_service: Arc<PublishingReadinessService>,
     pub job_runner: Arc<JobRunner>,
     pub video_repo: Arc<dyn VideoRepository>,
     pub paths: AppPaths,

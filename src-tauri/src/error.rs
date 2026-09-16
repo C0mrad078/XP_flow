@@ -5,6 +5,7 @@ use crate::domain::errors::DomainError;
 use crate::domain::media_error::MediaError;
 use crate::domain::ports::platform_connector::PlatformConnectorError;
 use crate::domain::ports::secure_storage::SecureStorageError;
+use crate::domain::publishing::PublishError;
 
 /// Error category surfaced to the frontend. The frontend switches on this
 /// to decide how to react (retry affordance, "reconnect" prompt, etc.)
@@ -188,6 +189,33 @@ impl From<AuthError> for AppError {
             | AuthError::TokenRefreshFailed { .. }
             | AuthError::BrokerConfigurationError { .. }
             | AuthError::ProviderNotConfigured { .. } => ErrorCode::Internal,
+        };
+        AppError::new(code, err.user_message(), format!("[{}] {err}", err.code()))
+    }
+}
+
+/// Same normalize-then-map pattern as `AuthError` above (section 70):
+/// `PublishError::code()`/`user_message()` are already the safe,
+/// classified surface — this only chooses the coarse `ErrorCode`.
+impl From<PublishError> for AppError {
+    fn from(err: PublishError) -> Self {
+        let code = match &err {
+            PublishError::AuthExpired | PublishError::AuthRevoked => ErrorCode::Authentication,
+            PublishError::RateLimited { .. } => ErrorCode::RateLimit,
+            PublishError::NetworkTransient | PublishError::Timeout => ErrorCode::Network,
+            PublishError::ProviderServerError { .. } | PublishError::PlatformNotApproved { .. } => {
+                ErrorCode::Platform
+            }
+            PublishError::PermissionMissing { .. }
+            | PublishError::InvalidMedia { .. }
+            | PublishError::InvalidMetadata { .. }
+            | PublishError::ConsentRequired
+            | PublishError::Cancelled
+            | PublishError::VideoUnavailable => ErrorCode::Validation,
+            PublishError::RemoteProcessingFailed { .. }
+            | PublishError::UploadSessionExpired
+            | PublishError::UnknownRemoteResult
+            | PublishError::Internal { .. } => ErrorCode::Internal,
         };
         AppError::new(code, err.user_message(), format!("[{}] {err}", err.code()))
     }

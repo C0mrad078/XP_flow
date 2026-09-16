@@ -21,7 +21,7 @@ use crate::domain::ports::repositories::{
 use crate::domain::publication::{Publication, PublicationStatus};
 use crate::domain::publishing::retry_policy::{attempts_exhausted, next_retry_at};
 use crate::domain::publishing::{
-    PublicationAttempt, PublishError, RemoteUploadState, RenderedMetadata,
+    requires_express_consent, PublicationAttempt, PublishError, RemoteUploadState, RenderedMetadata,
 };
 use crate::services::notification_service::NotificationService;
 
@@ -34,12 +34,51 @@ use crate::services::notification_service::NotificationService;
 /// healthy upload.
 const CLAIM_LEASE_DURATION: Duration = Duration::minutes(45);
 
-/// Section 31: only TikTok's Content Posting API requires XP FLOW to
-/// prove explicit per-publication approval before transmitting. YouTube
-/// and Kwai have no equivalent express-consent requirement in their
-/// documented publishing flows.
-fn requires_express_consent(platform: Platform) -> bool {
-    platform == Platform::TikTok
+/// Walks `Publication`'s real state machine (`domain::publication::
+/// PublicationStatus::allowed_next`) from wherever a publication
+/// currently sits to an immediately-due `Scheduled` state, for
+/// `publish_now`. Deliberately reuses every existing transition edge
+/// (the same ones `requeue_for_retry` and the scheduler already rely on)
+/// rather than special-casing "force" as a bypass of the state machine —
+/// a status this can't reach validly (mid-execution, terminal, or not yet
+/// past content validation) is refused, not overridden.
+fn force_schedule_now(
+    publication: &mut Publication,
+    now: chrono::DateTime<Utc>,
+) -> Result<(), PublishError> {
+    let invalid = |p: &Publication| PublishError::Internal {
+        detail: format!("cannot publish now from status {}", p.status),
+    };
+    match publication.status {
+        PublicationStatus::Scheduled => {}
+        PublicationStatus::Queued | PublicationStatus::Paused => {
+            publication
+                .transition(PublicationStatus::Scheduled)
+                .map_err(|_| invalid(publication))?;
+        }
+        PublicationStatus::AuthRequired => {
+            publication
+                .transition(PublicationStatus::Queued)
+                .map_err(|_| invalid(publication))?;
+            publication
+                .transition(PublicationStatus::Scheduled)
+                .map_err(|_| invalid(publication))?;
+        }
+        PublicationStatus::Failed | PublicationStatus::RateLimited => {
+            publication
+                .transition(PublicationStatus::RetryWait)
+                .map_err(|_| invalid(publication))?;
+            publication
+                .transition(PublicationStatus::Queued)
+                .map_err(|_| invalid(publication))?;
+            publication
+                .transition(PublicationStatus::Scheduled)
+                .map_err(|_| invalid(publication))?;
+        }
+        _ => return Err(invalid(publication)),
+    }
+    publication.scheduled_at = Some(now);
+    Ok(())
 }
 
 /// Orchestrates one publication's execution end to end (section 3-14):
@@ -149,6 +188,129 @@ impl PublishingEngineService {
         if let Err(err) = self.execute_inner(publication_id, &claim_token).await {
             tracing::warn!(publication_id = %publication_id, error = %err, "publication execution ended in error");
         }
+    }
+
+    /// Section 85: a user-initiated "Publish Now" — forces an otherwise
+    /// valid publication (not locked, not mid-execution, its channel not
+    /// paused) into an immediately-due `Scheduled` state and executes it
+    /// through the exact same claim-then-execute path as the periodic
+    /// scan, so it gets the same exactly-once guarantee — this is never a
+    /// separate, parallel execution path.
+    pub async fn publish_now(&self, publication_id: Uuid) -> Result<(), PublishError> {
+        let mut publication = self
+            .publication_repo
+            .get(publication_id)
+            .await
+            .map_err(|e| PublishError::Internal {
+                detail: e.to_string(),
+            })?
+            .ok_or_else(|| PublishError::Internal {
+                detail: "publication not found".to_string(),
+            })?;
+
+        if publication.locked {
+            return Err(PublishError::Internal {
+                detail: "publication is locked".to_string(),
+            });
+        }
+        match self.channel_repo.get(publication.channel_id).await {
+            Ok(Some(channel)) if channel.status == ChannelStatus::Paused => {
+                return Err(PublishError::Internal {
+                    detail: "the channel is paused".to_string(),
+                });
+            }
+            Ok(Some(_)) => {}
+            _ => {
+                return Err(PublishError::Internal {
+                    detail: "channel not found".to_string(),
+                })
+            }
+        }
+
+        let now = Utc::now();
+        force_schedule_now(&mut publication, now)?;
+        self.publication_repo
+            .update(&publication)
+            .await
+            .map_err(|e| PublishError::Internal {
+                detail: e.to_string(),
+            })?;
+
+        let claim_token = Uuid::new_v4().to_string();
+        let candidate_execution_key = publication.execution_key.unwrap_or_else(Uuid::new_v4);
+        let lease_expires_at = now + CLAIM_LEASE_DURATION;
+        let claimed = self
+            .publication_repo
+            .try_claim_due(
+                publication.id,
+                candidate_execution_key,
+                &claim_token,
+                lease_expires_at,
+                now,
+            )
+            .await
+            .map_err(|e| PublishError::Internal {
+                detail: e.to_string(),
+            })?;
+        if !claimed {
+            return Err(PublishError::Internal {
+                detail: "publication could not be claimed for immediate execution".to_string(),
+            });
+        }
+
+        self.execute_inner(publication.id, &claim_token).await
+    }
+
+    /// Durable, never-overwritten attempt history for the Publication
+    /// Details drawer (section 90/94) — newest first.
+    pub async fn get_attempts(&self, publication_id: Uuid) -> Vec<PublicationAttempt> {
+        self.attempt_repo
+            .list_for_publication(publication_id)
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Records explicit user approval of the publication's *current*
+    /// rendered metadata (section 31-34) — the only way a TikTok
+    /// publication's express-consent gate is ever satisfied. Always
+    /// inserts a fresh row rather than mutating one in place: the
+    /// approval trail stays a complete, auditable history, and
+    /// `PublicationConsentRepository::latest_for_publication` is what the
+    /// engine actually checks.
+    pub async fn record_consent(
+        &self,
+        publication_id: Uuid,
+        approval_source: crate::domain::publishing::ApprovalSource,
+    ) -> Result<(), PublishError> {
+        let publication = self
+            .publication_repo
+            .get(publication_id)
+            .await
+            .map_err(|e| PublishError::Internal {
+                detail: e.to_string(),
+            })?
+            .ok_or_else(|| PublishError::Internal {
+                detail: "publication not found".to_string(),
+            })?;
+
+        let metadata = RenderedMetadata {
+            title: publication.title.clone(),
+            description: publication.description.clone().unwrap_or_default(),
+            hashtags: publication.hashtags.clone(),
+            provider_options: serde_json::json!({}),
+        };
+        let consent = crate::domain::publishing::PublicationConsent::new(
+            publication_id,
+            publication.platform,
+            metadata.consent_hash(),
+            approval_source,
+        );
+        self.consent_repo
+            .create(&consent)
+            .await
+            .map_err(|e| PublishError::Internal {
+                detail: e.to_string(),
+            })
     }
 
     async fn execute_inner(
@@ -1397,5 +1559,140 @@ mod tests {
             publication.last_error.as_deref(),
             Some(PublishError::ConsentRequired.user_message().as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn publish_now_executes_a_publication_scheduled_far_in_the_future() {
+        let fixture = build_fixture(FakeScenario::Success).await;
+        let pool = fixture.pool.clone();
+        let publication_id = seed_ready_publication(
+            &pool,
+            fixture.workspace_id,
+            fixture.channel_id,
+            fixture.source_id,
+        )
+        .await;
+
+        let mut publication = fixture
+            .publication_repo
+            .get(publication_id)
+            .await
+            .unwrap()
+            .unwrap();
+        publication.scheduled_at = Some(Utc::now() + Duration::hours(6));
+        fixture.publication_repo.update(&publication).await.unwrap();
+
+        // Not due yet — the periodic scan must not touch it.
+        let claimed = fixture
+            .engine
+            .scan_and_claim_due(fixture.workspace_id)
+            .await;
+        assert!(claimed.is_empty());
+
+        fixture.engine.publish_now(publication_id).await.unwrap();
+
+        let published = fixture
+            .publication_repo
+            .get(publication_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(published.status, PublicationStatus::Published);
+    }
+
+    #[tokio::test]
+    async fn publish_now_refuses_a_locked_publication() {
+        let fixture = build_fixture(FakeScenario::Success).await;
+        let pool = fixture.pool.clone();
+        let publication_id = seed_ready_publication(
+            &pool,
+            fixture.workspace_id,
+            fixture.channel_id,
+            fixture.source_id,
+        )
+        .await;
+
+        let mut publication = fixture
+            .publication_repo
+            .get(publication_id)
+            .await
+            .unwrap()
+            .unwrap();
+        publication.locked = true;
+        fixture.publication_repo.update(&publication).await.unwrap();
+
+        let result = fixture.engine.publish_now(publication_id).await;
+        assert!(result.is_err());
+        let unchanged = fixture
+            .publication_repo
+            .get(publication_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.status, PublicationStatus::Scheduled);
+    }
+
+    #[tokio::test]
+    async fn get_attempts_returns_the_recorded_attempt_history() {
+        let fixture = build_fixture(FakeScenario::Success).await;
+        let pool = fixture.pool.clone();
+        let publication_id = seed_ready_publication(
+            &pool,
+            fixture.workspace_id,
+            fixture.channel_id,
+            fixture.source_id,
+        )
+        .await;
+
+        let claimed = fixture
+            .engine
+            .scan_and_claim_due(fixture.workspace_id)
+            .await;
+        let (id, claim_token) = claimed.into_iter().next().unwrap();
+        fixture.engine.execute(id, claim_token).await;
+
+        let attempts = fixture.engine.get_attempts(publication_id).await;
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts[0].status,
+            crate::domain::publishing::AttemptStatus::Succeeded
+        );
+    }
+
+    #[tokio::test]
+    async fn record_consent_unblocks_a_tiktok_publication_that_had_none() {
+        let fixture = build_fixture(FakeScenario::Success).await;
+        let pool = fixture.pool.clone();
+        let publication_id = seed_ready_publication(
+            &pool,
+            fixture.workspace_id,
+            fixture.channel_id,
+            fixture.source_id,
+        )
+        .await;
+        sqlx::query("DELETE FROM publication_consent WHERE publication_id = ?")
+            .bind(publication_id.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        fixture
+            .engine
+            .record_consent(
+                publication_id,
+                crate::domain::publishing::ApprovalSource::ManualSchedule,
+            )
+            .await
+            .unwrap();
+
+        let claimed = fixture
+            .engine
+            .scan_and_claim_due(fixture.workspace_id)
+            .await;
+        let (id, claim_token) = claimed.into_iter().next().unwrap();
+        fixture.engine.execute(id, claim_token).await;
+
+        let publication = fixture.publication_repo.get(id).await.unwrap().unwrap();
+        assert_eq!(publication.status, PublicationStatus::Published);
     }
 }

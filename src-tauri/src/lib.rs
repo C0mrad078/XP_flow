@@ -23,6 +23,7 @@ use application::platform_account_service::PlatformAccountService;
 use application::platform_auth_service::PlatformAuthService;
 use application::publication_service::PublicationService;
 use application::publishing_engine_service::PublishingEngineService;
+use application::publishing_readiness_service::PublishingReadinessService;
 use application::schedule_slot_service::ScheduleSlotService;
 use application::scheduler_service::SchedulerService;
 use application::settings_service::SettingsService;
@@ -164,6 +165,11 @@ pub fn run() {
             commands::publication_commands::set_publication_priority,
             commands::publication_commands::set_publication_locked,
             commands::publication_commands::reorder_queue,
+            commands::publishing_commands::publish_now,
+            commands::publishing_commands::retry_publication,
+            commands::publishing_commands::get_publication_attempts,
+            commands::publishing_commands::get_publication_readiness,
+            commands::publishing_commands::record_publication_consent,
             commands::scheduler_commands::schedule_publication,
             commands::scheduler_commands::unschedule_publication,
             commands::scheduler_commands::reschedule_publication_to_date,
@@ -478,19 +484,27 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
             )) as Arc<dyn PlatformPublisher>
         },
     );
+    let publication_consent_repo = Arc::new(SqlitePublicationConsentRepository::new(pool.clone()));
     let publishing_engine_service = Arc::new(PublishingEngineService::new(
         publication_repo.clone(),
         publication_attempt_repo,
         upload_session_repo,
         video_repo.clone(),
-        platform_account_repo,
+        platform_account_repo.clone(),
         channel_repo.clone(),
-        Arc::new(SqlitePublicationConsentRepository::new(pool.clone())),
+        publication_consent_repo.clone(),
         hash_service.clone(),
         credential_service,
-        publishers,
+        publishers.clone(),
         activity_service.clone(),
         notification_service.clone(),
+    ));
+    let publishing_readiness_service = Arc::new(PublishingReadinessService::new(
+        publication_repo.clone(),
+        video_repo.clone(),
+        platform_account_repo,
+        publication_consent_repo,
+        publishers,
     ));
 
     let ingestion = Arc::new(MediaIngestionService::new(
@@ -613,6 +627,7 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         platform_auth_service,
         token_lifecycle_service,
         publishing_engine_service,
+        publishing_readiness_service,
         job_runner,
         video_repo,
         paths,
