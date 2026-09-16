@@ -38,16 +38,17 @@ management for two providers.
 
 ## 3. API (all under `/v1`)
 
-| Route                              | Purpose                                                                                                                                             |
-| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /v1/health`                   | Liveness check                                                                                                                                      |
-| `POST /v1/auth/tiktok/exchange`    | Confidential code-for-token exchange, given `{session_id, workspace_id, code, code_verifier, redirect_uri}` from the desktop's own loopback capture |
-| `POST /v1/auth/kwai/start`         | Creates a pending session, returns `{session_id, authorize_url}`                                                                                    |
-| `GET /v1/auth/kwai/callback`       | Kwai's own OAuth redirect target — registered with Kwai, not a desktop loopback port                                                                |
-| `GET /v1/auth/sessions/:id`        | Poll target for both TikTok and Kwai flows                                                                                                          |
-| `POST /v1/connections/:id/refresh` | Refresh a stored token                                                                                                                              |
-| `POST /v1/connections/:id/revoke`  | Best-effort provider-side revocation                                                                                                                |
-| `GET /v1/connections/:id/status`   | Connection status without exposing the token itself                                                                                                 |
+| Route                                   | Purpose                                                                                                                                             |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /v1/health`                        | Liveness check                                                                                                                                      |
+| `POST /v1/auth/tiktok/exchange`         | Confidential code-for-token exchange, given `{session_id, workspace_id, code, code_verifier, redirect_uri}` from the desktop's own loopback capture |
+| `POST /v1/auth/kwai/start`              | Creates a pending session, returns `{session_id, authorize_url}`                                                                                    |
+| `GET /v1/auth/kwai/callback`            | Kwai's own OAuth redirect target — registered with Kwai, not a desktop loopback port                                                                |
+| `GET /v1/auth/sessions/:id`             | Poll target for both TikTok and Kwai flows                                                                                                          |
+| `POST /v1/connections/:id/refresh`      | Refresh a stored token                                                                                                                              |
+| `POST /v1/connections/:id/revoke`       | Best-effort provider-side revocation                                                                                                                |
+| `GET /v1/connections/:id/status`        | Connection status without exposing the token itself                                                                                                 |
+| `POST /v1/connections/:id/access-token` | Returns the current (refreshing first if expiring within 10 minutes) raw access token — see §8                                                      |
 
 ## 4. Running it locally
 
@@ -97,3 +98,15 @@ Never a place to add: content storage, queue/schedule state, analytics, comment 
 If a future feature needs a server-side component that isn't provider-confidential-credential handling, it needs
 its own justification and its own service — growing this one into a general backend was an explicit non-goal from
 the start (Phase 4 spec, "no generic proxy / must never become a general SaaS backend").
+
+## 8. Access tokens leave the broker — deliberately, for one reason
+
+Every other response this broker returns (`ConnectionView`, `ConnectionStatusView`) deliberately omits the raw
+access token. `POST /v1/connections/:id/access-token` is the one exception, added in Phase 5: TikTok and Kwai
+video bytes must stream directly from the desktop to the provider's own upload endpoints, never through this
+broker (see `docs/platform-authentication.md` and the publishing engine docs — no video proxy, ever). The desktop
+can't make that direct, authenticated call without the bearer token itself, so this endpoint hands it over,
+refreshing first if the stored token is expiring within 10 minutes. Everything that stays genuinely confidential —
+the refresh token, the provider client secret — never leaves this service. The desktop treats the returned token
+exactly like `LocalCredential` (never logged, never written to SQLite, held only in memory for the duration of an
+upload attempt).

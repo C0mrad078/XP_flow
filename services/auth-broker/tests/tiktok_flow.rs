@@ -269,3 +269,99 @@ async fn refresh_and_revoke_round_trip_through_a_real_connection() {
         .unwrap();
     assert_eq!(revoke_response.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn access_token_endpoint_returns_the_current_token_without_refreshing_when_fresh() {
+    let mock_server = MockServer::start().await;
+    mount_successful_token_and_identity(&mock_server).await;
+    let app = test_app(&mock_server).await;
+
+    let (_, connect_body) = post_json(
+        app.clone(),
+        "/v1/auth/tiktok/exchange",
+        json!({
+            "session_id": "session-token",
+            "workspace_id": "workspace-1",
+            "code": "auth-code",
+            "code_verifier": "verifier",
+            "redirect_uri": "http://127.0.0.1:12345/oauth/tiktok/callback",
+        }),
+    )
+    .await;
+    let connection_id = connect_body["connection_id"].as_str().unwrap().to_string();
+
+    // No /oauth/token mock is registered for this call — if the handler
+    // refreshed when it shouldn't have, the request would fail and this
+    // assertion would catch it.
+    let (status, body) = post_json(
+        app,
+        &format!("/v1/connections/{connection_id}/access-token"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["access_token"], "fake-access-token");
+}
+
+#[tokio::test]
+async fn access_token_endpoint_refreshes_first_when_the_token_is_expiring_soon() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .and(wiremock::matchers::body_string_contains(
+            "grant_type=authorization_code",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "about-to-expire-token",
+            "refresh_token": "refresh-token",
+            "expires_in": 30,
+            "refresh_expires_in": 86400,
+            "scope": "user.info.basic"
+        })))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/user/info"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": { "user": { "open_id": "user-expiring", "display_name": "Expiring User" } }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let app = test_app(&mock_server).await;
+    let (_, connect_body) = post_json(
+        app.clone(),
+        "/v1/auth/tiktok/exchange",
+        json!({
+            "session_id": "session-expiring",
+            "workspace_id": "workspace-1",
+            "code": "auth-code",
+            "code_verifier": "verifier",
+            "redirect_uri": "http://127.0.0.1:12345/oauth/tiktok/callback",
+        }),
+    )
+    .await;
+    let connection_id = connect_body["connection_id"].as_str().unwrap().to_string();
+
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .and(wiremock::matchers::body_string_contains(
+            "grant_type=refresh_token",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "freshly-rotated-token",
+            "expires_in": 3600,
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let (status, body) = post_json(
+        app,
+        &format!("/v1/connections/{connection_id}/access-token"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["access_token"], "freshly-rotated-token");
+}

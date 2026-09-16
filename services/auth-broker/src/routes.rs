@@ -21,6 +21,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/connections/:id/refresh", post(refresh_connection))
         .route("/v1/connections/:id/revoke", post(revoke_connection))
         .route("/v1/connections/:id/status", get(connection_status))
+        .route("/v1/connections/:id/access-token", post(issue_access_token))
         .with_state(state)
 }
 
@@ -362,9 +363,22 @@ async fn refresh_connection(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<ConnectionView>, BrokerError> {
+    let refreshed = do_refresh(&state, &id).await?;
+    Ok(Json(ConnectionView::from(&refreshed)))
+}
+
+/// Shared by `refresh_connection` and `issue_access_token` — decrypts the
+/// stored refresh token, calls the provider, and persists the rotated
+/// tokens. Callers get back the connection row (still encrypted); it's on
+/// each caller to decide whether the caller needs the plaintext access
+/// token (only `issue_access_token` does).
+async fn do_refresh(
+    state: &Arc<AppState>,
+    id: &str,
+) -> Result<crate::store::Connection, BrokerError> {
     let connection = state
         .store
-        .get_connection(&id)
+        .get_connection(id)
         .await?
         .ok_or(BrokerError::ConnectionNotFound)?;
     if connection.revoked_at.is_some() {
@@ -408,7 +422,7 @@ async fn refresh_connection(
     state
         .store
         .update_connection_tokens(
-            &id,
+            id,
             &access_encrypted,
             refresh_encrypted.as_deref(),
             tokens.access_expires_at,
@@ -416,12 +430,54 @@ async fn refresh_connection(
         )
         .await?;
 
-    let refreshed = state
+    state
+        .store
+        .get_connection(id)
+        .await?
+        .ok_or(BrokerError::ConnectionNotFound)
+}
+
+/// The one deliberate exception to "the broker never hands back a raw
+/// token" (Phase 4's whole framing): Phase 5 requires TikTok/Kwai video
+/// bytes to stream directly from the desktop to the provider, never
+/// through this broker (section 156/157 — no video proxy). The desktop
+/// can't make that direct, authenticated upload call without the bearer
+/// token itself, so this endpoint exists to hand over exactly that token,
+/// refreshing first if it's expiring soon. Everything else about a
+/// connection (the refresh token, the client secret) stays broker-side.
+const ACCESS_TOKEN_REFRESH_BUFFER_SECS: i64 = 10 * 60;
+
+#[derive(Serialize)]
+struct AccessTokenView {
+    access_token: String,
+    expires_at: Option<DateTime<Utc>>,
+}
+
+async fn issue_access_token(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<AccessTokenView>, BrokerError> {
+    let mut connection = state
         .store
         .get_connection(&id)
         .await?
         .ok_or(BrokerError::ConnectionNotFound)?;
-    Ok(Json(ConnectionView::from(&refreshed)))
+    if connection.revoked_at.is_some() {
+        return Err(BrokerError::TokenRevoked);
+    }
+
+    let needs_refresh = connection.access_expires_at.is_none_or(|expires_at| {
+        expires_at <= Utc::now() + chrono::Duration::seconds(ACCESS_TOKEN_REFRESH_BUFFER_SECS)
+    });
+    if needs_refresh {
+        connection = do_refresh(&state, &id).await?;
+    }
+
+    let access_token = state.cipher.decrypt(&connection.access_token_encrypted)?;
+    Ok(Json(AccessTokenView {
+        access_token,
+        expires_at: connection.access_expires_at,
+    }))
 }
 
 async fn revoke_connection(
