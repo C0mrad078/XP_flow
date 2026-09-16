@@ -47,7 +47,7 @@ use infrastructure::connectors::kwai::{KwaiAuthProvider, KwaiConnector};
 use infrastructure::connectors::tiktok::{TikTokAuthConfig, TikTokAuthProvider, TikTokConnector};
 use infrastructure::connectors::youtube::api_client::YouTubeApiClient;
 use infrastructure::connectors::youtube::{
-    YouTubeAuthConfig, YouTubeAuthProvider, YouTubeConnector,
+    YouTubeAuthConfig, YouTubeAuthProvider, YouTubeConnector, YouTubeUploader,
 };
 use infrastructure::connectors::{StubAuthProvider, StubConnector};
 use infrastructure::hashing::{DHashPerceptualHashService, Sha256ContentHashService};
@@ -315,6 +315,10 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
 
     let youtube_config = YouTubeAuthConfig::resolve();
     let tiktok_config = TikTokAuthConfig::resolve();
+    // `youtube_config` is consumed (by value) in the match below;
+    // captured here so the publisher-wiring section further down still
+    // knows whether a real `YouTubeUploader` can be registered.
+    let youtube_configured = youtube_config.is_some();
 
     let mut auth_providers: std::collections::HashMap<Platform, Arc<dyn PlatformAuthProvider>> =
         std::collections::HashMap::new();
@@ -436,7 +440,7 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
     // above.
     let mut publishers: std::collections::HashMap<Platform, Arc<dyn PlatformPublisher>> =
         std::collections::HashMap::new();
-    for platform in [Platform::YouTube, Platform::TikTok, Platform::Kwai] {
+    for platform in [Platform::TikTok, Platform::Kwai] {
         publishers.insert(
             platform,
             Arc::new(StubPublisher::new(
@@ -445,6 +449,17 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
             )),
         );
     }
+    publishers.insert(
+        Platform::YouTube,
+        if youtube_configured {
+            Arc::new(YouTubeUploader::new()) as Arc<dyn PlatformPublisher>
+        } else {
+            Arc::new(StubPublisher::new(
+                Platform::YouTube,
+                "YOUTUBE_CLIENT_ID is not configured",
+            )) as Arc<dyn PlatformPublisher>
+        },
+    );
     let publishing_engine_service = Arc::new(PublishingEngineService::new(
         publication_repo.clone(),
         publication_attempt_repo,

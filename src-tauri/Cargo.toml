@@ -53,6 +53,9 @@ base64 = "0.22"
 url = "2"
 axum = "0.7"
 
+[dev-dependencies]
+wiremock = "0.6"
+
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

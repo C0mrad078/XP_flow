@@ -9,7 +9,9 @@ pub mod api_client;
 pub mod auth_provider;
 pub mod config;
 pub mod connector;
+pub mod uploader;
 
 pub use auth_provider::YouTubeAuthProvider;
 pub use config::YouTubeAuthConfig;
 pub use connector::YouTubeConnector;
+pub use uploader::YouTubeUploader;
