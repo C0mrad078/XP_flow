@@ -24,15 +24,15 @@ The result is a **two-port split**, not one uniform OAuth client:
 
 `domain::platform_account::PlatformAccount` — no OAuth secret ever lives on this row:
 
-| Field | Purpose |
-|---|---|
-| `provider_account_id` | The real provider's stable account id — what identity-uniqueness is keyed on |
-| `provider_connection_id` | Opaque broker-side connection id (TikTok/Kwai only; `None` for YouTube) |
-| `display_name`, `username_or_handle`, `avatar_url` | Profile display only |
-| `status` | `PlatformAccountStatus` — see §4 |
-| `granted_scopes`, `capabilities` | Raw provider scopes, and the derived `Capability` set (see `docs/provider-capabilities.md`) |
-| `access_expires_at`, `refresh_expires_at` | Token lifetime, used by the refresh sweep and by `ConnectionHealth` |
-| `last_validated_at`, `last_refreshed_at`, `last_error_code`, `last_error_message` | Operational history |
+| Field                                                                             | Purpose                                                                                     |
+| --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `provider_account_id`                                                             | The real provider's stable account id — what identity-uniqueness is keyed on                |
+| `provider_connection_id`                                                          | Opaque broker-side connection id (TikTok/Kwai only; `None` for YouTube)                     |
+| `display_name`, `username_or_handle`, `avatar_url`                                | Profile display only                                                                        |
+| `status`                                                                          | `PlatformAccountStatus` — see §4                                                            |
+| `granted_scopes`, `capabilities`                                                  | Raw provider scopes, and the derived `Capability` set (see `docs/provider-capabilities.md`) |
+| `access_expires_at`, `refresh_expires_at`                                         | Token lifetime, used by the refresh sweep and by `ConnectionHealth`                         |
+| `last_validated_at`, `last_refreshed_at`, `last_error_code`, `last_error_message` | Operational history                                                                         |
 
 Raw token material lives elsewhere: YouTube's access/refresh tokens go into the OS keychain via `SecureStorage`
 (`infrastructure::secure_storage`), keyed `xpflow.youtube.credential.{account_id}`. TikTok/Kwai tokens never leave
@@ -41,7 +41,7 @@ the Auth Broker's own encrypted SQLite — the desktop only ever holds `provider
 **Identity safety.** The same real provider account cannot be connected twice in a workspace — enforced at both
 layers: `PlatformAuthService::finish_connect` checks `find_by_provider_identity` before persisting, and
 `idx_platform_accounts_identity` (a partial unique index on `(workspace_id, platform, provider_account_id) WHERE
-provider_account_id IS NOT NULL`) is the database-level backstop. Reconnecting an existing row with a *different*
+provider_account_id IS NOT NULL`) is the database-level backstop. Reconnecting an existing row with a _different_
 real account fails closed with `AccountIdentityMismatch` unless the caller explicitly passes
 `allow_identity_change: true` — never a silent identity swap. A `Revoked` row (from a prior disconnect) is not
 treated as "connected" for this check — a fresh "Connect" for the same real account revives that row and moves it
@@ -87,7 +87,7 @@ These are deliberately not the same thing:
   Phase 3's publication-overdue detection. `TOKEN_EXPIRING_BUFFER` is 24 hours. Mirrored client-side in
   `src/types/platform-auth.ts::deriveConnectionHealth` rather than round-tripped over IPC for every row rendered.
 - **`AuthFlowState`** (in-memory, live progress only) — `OpeningBrowser → WaitingForAuthorization →
-  VerifyingAccount → SavingConnection → Connected | Failed{code, message}`. This is what a connect/reconnect
+VerifyingAccount → SavingConnection → Connected | Failed{code, message}`. This is what a connect/reconnect
   dialog polls; it has no relationship to the persisted `status` of an account that already exists.
 - **`Capability`** (derived from `granted_scopes` via `domain::capability::map_scopes_to_capabilities`) —
   `ReadProfile`, `UploadVideo`, `ReadVideoStatus`, `ReadMetrics`, `ReadComments`, `WriteComments`. See

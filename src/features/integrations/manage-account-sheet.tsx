@@ -1,3 +1,5 @@
+import { ClipboardCopy } from "lucide-react";
+
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -35,6 +37,29 @@ export function ManageAccountSheet({ account, onClose, onReconnect }: ManageAcco
 
   if (!account) return null;
   const health = deriveConnectionHealth(account);
+
+  /** Section 104/105 — a plain non-secret snapshot for a support request,
+   * never a full diagnostics dashboard. Every field here already appears
+   * elsewhere on this sheet; this just makes it pasteable. No token, no
+   * scope-adjacent secret, no PKCE material ever touches this object. */
+  async function handleCopyDiagnostics() {
+    if (!account) return;
+    const diagnostics = {
+      platform: account.platform,
+      status: account.status,
+      connection_health: health,
+      capabilities: account.capabilities,
+      granted_scopes: account.granted_scopes,
+      access_expires_at: account.access_expires_at,
+      refresh_expires_at: account.refresh_expires_at,
+      last_validated_at: account.last_validated_at,
+      last_refreshed_at: account.last_refreshed_at,
+      last_error_code: account.last_error_code,
+      last_error_message: account.last_error_message,
+    };
+    await navigator.clipboard.writeText(JSON.stringify(diagnostics, null, 2));
+    toast({ variant: "success", title: "Diagnostics copied" });
+  }
 
   async function handleDisconnect() {
     if (!account) return;
@@ -176,6 +201,10 @@ export function ManageAccountSheet({ account, onClose, onReconnect }: ManageAcco
           </Button>
           <Button variant="outline" onClick={() => onReconnect(account)}>
             Reconnect
+          </Button>
+          <Button variant="ghost" onClick={handleCopyDiagnostics}>
+            <ClipboardCopy className="size-3.5" />
+            Copy diagnostics
           </Button>
           <Button variant="destructive" onClick={handleDisconnect} disabled={disconnect.isPending}>
             Disconnect

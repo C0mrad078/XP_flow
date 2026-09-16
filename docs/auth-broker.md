@@ -38,16 +38,16 @@ management for two providers.
 
 ## 3. API (all under `/v1`)
 
-| Route | Purpose |
-|---|---|
-| `GET /v1/health` | Liveness check |
-| `POST /v1/auth/tiktok/exchange` | Confidential code-for-token exchange, given `{session_id, workspace_id, code, code_verifier, redirect_uri}` from the desktop's own loopback capture |
-| `POST /v1/auth/kwai/start` | Creates a pending session, returns `{session_id, authorize_url}` |
-| `GET /v1/auth/kwai/callback` | Kwai's own OAuth redirect target — registered with Kwai, not a desktop loopback port |
-| `GET /v1/auth/sessions/:id` | Poll target for both TikTok and Kwai flows |
-| `POST /v1/connections/:id/refresh` | Refresh a stored token |
-| `POST /v1/connections/:id/revoke` | Best-effort provider-side revocation |
-| `GET /v1/connections/:id/status` | Connection status without exposing the token itself |
+| Route                              | Purpose                                                                                                                                             |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /v1/health`                   | Liveness check                                                                                                                                      |
+| `POST /v1/auth/tiktok/exchange`    | Confidential code-for-token exchange, given `{session_id, workspace_id, code, code_verifier, redirect_uri}` from the desktop's own loopback capture |
+| `POST /v1/auth/kwai/start`         | Creates a pending session, returns `{session_id, authorize_url}`                                                                                    |
+| `GET /v1/auth/kwai/callback`       | Kwai's own OAuth redirect target — registered with Kwai, not a desktop loopback port                                                                |
+| `GET /v1/auth/sessions/:id`        | Poll target for both TikTok and Kwai flows                                                                                                          |
+| `POST /v1/connections/:id/refresh` | Refresh a stored token                                                                                                                              |
+| `POST /v1/connections/:id/revoke`  | Best-effort provider-side revocation                                                                                                                |
+| `GET /v1/connections/:id/status`   | Connection status without exposing the token itself                                                                                                 |
 
 ## 4. Running it locally
 
@@ -75,7 +75,7 @@ non-HTTPS broker URL drops the broker client entirely (`Stub`) rather than sendi
 **TikTok** — a Login Kit + Content Posting API app in the [TikTok for Developers](https://developers.tiktok.com)
 console. Register the desktop's loopback redirect pattern (`http://127.0.0.1:*/oauth/tiktok/callback` — TikTok's
 console needs an exact or wildcard-compatible URI depending on current policy; check the console's current
-requirements). `TIKTOK_CLIENT_KEY` goes to *both* the desktop (`.env`/environment, non-secret) and the broker;
+requirements). `TIKTOK_CLIENT_KEY` goes to _both_ the desktop (`.env`/environment, non-secret) and the broker;
 `TIKTOK_CLIENT_SECRET` goes to the broker **only** — it must never be present in the desktop's environment, build,
 or source.
 

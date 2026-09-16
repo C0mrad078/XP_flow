@@ -23,38 +23,38 @@ tested directly against literal scope strings.
 
 ### YouTube (Google scope URIs)
 
-| Scope | Capability granted |
-|---|---|
-| `openid`, `.../auth/userinfo.profile` | `ReadProfile` |
-| `.../auth/youtube.readonly`, `.../auth/youtube.force-ssl` | `ReadVideoStatus`, `ReadMetrics` |
-| `.../auth/youtube.upload`, `.../auth/youtube.force-ssl` | `UploadVideo` |
-| `.../auth/youtube.force-ssl` | also `ReadComments`, `WriteComments` |
+| Scope                                                     | Capability granted                   |
+| --------------------------------------------------------- | ------------------------------------ |
+| `openid`, `.../auth/userinfo.profile`                     | `ReadProfile`                        |
+| `.../auth/youtube.readonly`, `.../auth/youtube.force-ssl` | `ReadVideoStatus`, `ReadMetrics`     |
+| `.../auth/youtube.upload`, `.../auth/youtube.force-ssl`   | `UploadVideo`                        |
+| `.../auth/youtube.force-ssl`                              | also `ReadComments`, `WriteComments` |
 
 ### TikTok
 
-| Scope | Capability granted |
-|---|---|
-| `user.info.basic`, `user.info.profile` | `ReadProfile` |
-| `video.list` | `ReadVideoStatus` |
-| `video.publish`, `video.upload` | `UploadVideo` |
+| Scope                                  | Capability granted |
+| -------------------------------------- | ------------------ |
+| `user.info.basic`, `user.info.profile` | `ReadProfile`      |
+| `video.list`                           | `ReadVideoStatus`  |
+| `video.publish`, `video.upload`        | `UploadVideo`      |
 
 ### Kwai
 
-| Scope | Capability granted |
-|---|---|
-| `user_info` | `ReadProfile` |
-| `video_upload` | `UploadVideo` |
-| `video_status` | `ReadVideoStatus` |
+| Scope          | Capability granted |
+| -------------- | ------------------ |
+| `user_info`    | `ReadProfile`      |
+| `video_upload` | `UploadVideo`      |
+| `video_status` | `ReadVideoStatus`  |
 
 ## Default requested scopes (least privilege)
 
 `default_requested_scopes(platform)` — what XP FLOW actually asks for today:
 
-| Platform | Scopes requested | Capabilities this yields |
-|---|---|---|
-| YouTube | `openid`, `.../auth/userinfo.profile`, `.../auth/youtube.readonly` | `ReadProfile`, `ReadVideoStatus`, `ReadMetrics` |
-| TikTok | `user.info.basic` | `ReadProfile` |
-| Kwai | `user_info` | `ReadProfile` |
+| Platform | Scopes requested                                                   | Capabilities this yields                        |
+| -------- | ------------------------------------------------------------------ | ----------------------------------------------- |
+| YouTube  | `openid`, `.../auth/userinfo.profile`, `.../auth/youtube.readonly` | `ReadProfile`, `ReadVideoStatus`, `ReadMetrics` |
+| TikTok   | `user.info.basic`                                                  | `ReadProfile`                                   |
+| Kwai     | `user_info`                                                        | `ReadProfile`                                   |
 
 **None of these ever grant `UploadVideo`** — enforced by a test
 (`capability::tests::default_requested_scopes_never_include_publishing`) that runs the default scopes for every
