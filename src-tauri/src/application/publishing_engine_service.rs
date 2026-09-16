@@ -552,6 +552,15 @@ impl PublishingEngineService {
         }
 
         let Some(session) = session else { return };
+        let Some(video) = self
+            .video_repo
+            .get(publication.video_id)
+            .await
+            .ok()
+            .flatten()
+        else {
+            return;
+        };
         let Some(account) = (match publication.platform_account_id {
             Some(id) => self.platform_account_repo.get(id).await.ok().flatten(),
             None => None,
@@ -566,7 +575,7 @@ impl PublishingEngineService {
         };
 
         match publisher
-            .recover_upload(&access_token, session.clone())
+            .recover_upload(&access_token, session.clone(), &video)
             .await
         {
             Ok(recovered) => {

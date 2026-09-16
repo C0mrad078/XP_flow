@@ -195,6 +195,7 @@ impl PlatformPublisher for FakePublisher {
         &self,
         access_token: &str,
         session: UploadSession,
+        video: &Video,
     ) -> Result<UploadSession, PublishError> {
         if session.state.safe_to_restart() {
             return Ok(session);
@@ -203,19 +204,9 @@ impl PlatformPublisher for FakePublisher {
         // can resume from the committed byte count — a real provider's
         // recovery would call a status/session-query endpoint here
         // instead of blindly assuming success.
-        let (_sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
-        let video = Video::new(
-            Uuid::nil(),
-            Uuid::nil(),
-            None,
-            "recovered".to_string(),
-            "recovered",
-            "/dev/null".to_string(),
-            session.bytes_total.unwrap_or(0),
-            "mp4",
-        );
+        let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let (session, result) = self
-            .upload_media(access_token, session, &video, _sender, CancelSignal::new())
+            .upload_media(access_token, session, video, sender, CancelSignal::new())
             .await;
         result.map(|()| session)
     }

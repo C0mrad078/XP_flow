@@ -87,6 +87,7 @@ impl PlatformPublisher for StubPublisher {
         &self,
         _access_token: &str,
         _session: UploadSession,
+        _video: &Video,
     ) -> Result<UploadSession, PublishError> {
         Err(self.err())
     }

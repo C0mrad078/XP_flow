@@ -119,14 +119,19 @@ pub trait PlatformPublisher: Send + Sync {
     ) -> Result<RemoteUploadState, PublishError>;
 
     /// Given a persisted, possibly-stale session (loaded after a crash or
-    /// an ambiguous failure), determines whether it's safe to resume,
-    /// must be verified against the provider first, or must be
-    /// discarded — never blindly starts a new session over one whose
-    /// `RemoteUploadState` isn't `safe_to_restart` (section 42/43/55/88).
+    /// an ambiguous failure), verifies real remote state and — where
+    /// possible — resumes and completes the transfer from the last
+    /// confirmed byte, reading the remaining bytes from `video` on disk
+    /// (never blindly starting a new session over one whose
+    /// `RemoteUploadState` isn't `safe_to_restart` — section 42/43/55/88).
+    /// Returns the session in whatever state this determined — terminal
+    /// or still in progress — for the caller to act on exactly as it
+    /// would after a fresh `upload_media` call.
     async fn recover_upload(
         &self,
         access_token: &str,
         session: UploadSession,
+        video: &Video,
     ) -> Result<UploadSession, PublishError>;
 
     /// Best-effort cancellation of an in-progress (not yet finalized)
