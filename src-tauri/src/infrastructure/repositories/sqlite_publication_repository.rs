@@ -32,6 +32,11 @@ fn row_to_publication(row: &sqlx::sqlite::SqliteRow) -> Result<Publication, Doma
         row.try_get("platform_account_id").map_err(map_repo_err)?;
     let scheduled_at: Option<String> = row.try_get("scheduled_at").map_err(map_repo_err)?;
     let published_at: Option<String> = row.try_get("published_at").map_err(map_repo_err)?;
+    let execution_key: Option<String> = row.try_get("execution_key").map_err(map_repo_err)?;
+    let lease_expires_at: Option<String> = row.try_get("lease_expires_at").map_err(map_repo_err)?;
+    let rendered_metadata_json: Option<String> = row
+        .try_get("rendered_metadata_json")
+        .map_err(map_repo_err)?;
 
     Ok(Publication {
         id: Uuid::parse_str(&row.try_get::<String, _>("id").map_err(map_repo_err)?)
@@ -73,6 +78,10 @@ fn row_to_publication(row: &sqlx::sqlite::SqliteRow) -> Result<Publication, Doma
         remote_id: row.try_get("remote_id").map_err(map_repo_err)?,
         retry_count: row.try_get("retry_count").map_err(map_repo_err)?,
         last_error: row.try_get("last_error").map_err(map_repo_err)?,
+        execution_key: execution_key.and_then(|s| Uuid::parse_str(&s).ok()),
+        claim_token: row.try_get("claim_token").map_err(map_repo_err)?,
+        lease_expires_at: lease_expires_at.map(|s| parse_dt(&s)),
+        rendered_metadata: rendered_metadata_json.and_then(|json| serde_json::from_str(&json).ok()),
         created_at: parse_dt(
             &row.try_get::<String, _>("created_at")
                 .map_err(map_repo_err)?,
@@ -85,15 +94,17 @@ fn row_to_publication(row: &sqlx::sqlite::SqliteRow) -> Result<Publication, Doma
 }
 
 const SELECT_COLUMNS: &str = "id, workspace_id, video_id, channel_id, platform_account_id, platform, status, title, \
-     description, hashtags_json, priority, locked, scheduled_at, published_at, remote_id, retry_count, last_error, created_at, updated_at";
+     description, hashtags_json, priority, locked, scheduled_at, published_at, remote_id, retry_count, last_error, \
+     execution_key, claim_token, lease_expires_at, rendered_metadata_json, created_at, updated_at";
 
 #[async_trait]
 impl PublicationRepository for SqlitePublicationRepository {
     async fn create(&self, publication: &Publication) -> DomainResult<()> {
         sqlx::query(
             "INSERT INTO publications (id, workspace_id, video_id, channel_id, platform_account_id, platform, status, title, \
-             description, hashtags_json, priority, locked, scheduled_at, published_at, remote_id, retry_count, last_error, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             description, hashtags_json, priority, locked, scheduled_at, published_at, remote_id, retry_count, last_error, \
+             execution_key, claim_token, lease_expires_at, rendered_metadata_json, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(publication.id.to_string())
         .bind(publication.workspace_id.to_string())
@@ -112,6 +123,15 @@ impl PublicationRepository for SqlitePublicationRepository {
         .bind(&publication.remote_id)
         .bind(publication.retry_count)
         .bind(&publication.last_error)
+        .bind(publication.execution_key.map(|id| id.to_string()))
+        .bind(&publication.claim_token)
+        .bind(publication.lease_expires_at.map(|dt| dt.to_rfc3339()))
+        .bind(
+            publication
+                .rendered_metadata
+                .as_ref()
+                .map(|m| serde_json::to_string(m).unwrap_or_default()),
+        )
         .bind(publication.created_at.to_rfc3339())
         .bind(publication.updated_at.to_rfc3339())
         .execute(&self.pool)
@@ -128,7 +148,8 @@ impl PublicationRepository for SqlitePublicationRepository {
     async fn update(&self, publication: &Publication) -> DomainResult<()> {
         sqlx::query(
             "UPDATE publications SET platform_account_id = ?, status = ?, title = ?, description = ?, hashtags_json = ?, \
-             priority = ?, locked = ?, scheduled_at = ?, published_at = ?, remote_id = ?, retry_count = ?, last_error = ?, updated_at = ? \
+             priority = ?, locked = ?, scheduled_at = ?, published_at = ?, remote_id = ?, retry_count = ?, last_error = ?, \
+             execution_key = ?, claim_token = ?, lease_expires_at = ?, rendered_metadata_json = ?, updated_at = ? \
              WHERE id = ?",
         )
         .bind(publication.platform_account_id.map(|id| id.to_string()))
@@ -143,6 +164,15 @@ impl PublicationRepository for SqlitePublicationRepository {
         .bind(&publication.remote_id)
         .bind(publication.retry_count)
         .bind(&publication.last_error)
+        .bind(publication.execution_key.map(|id| id.to_string()))
+        .bind(&publication.claim_token)
+        .bind(publication.lease_expires_at.map(|dt| dt.to_rfc3339()))
+        .bind(
+            publication
+                .rendered_metadata
+                .as_ref()
+                .map(|m| serde_json::to_string(m).unwrap_or_default()),
+        )
         .bind(publication.updated_at.to_rfc3339())
         .bind(publication.id.to_string())
         .execute(&self.pool)
@@ -393,6 +423,49 @@ impl PublicationRepository for SqlitePublicationRepository {
             })
             .collect()
     }
+
+    async fn try_claim_due(
+        &self,
+        id: Uuid,
+        candidate_execution_key: Uuid,
+        claim_token: &str,
+        lease_expires_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> DomainResult<bool> {
+        let result = sqlx::query(
+            "UPDATE publications SET status = 'uploading', \
+             execution_key = COALESCE(execution_key, ?), claim_token = ?, lease_expires_at = ?, updated_at = ? \
+             WHERE id = ? AND status = 'scheduled' AND scheduled_at <= ? AND locked = 0",
+        )
+        .bind(candidate_execution_key.to_string())
+        .bind(claim_token)
+        .bind(lease_expires_at.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .bind(id.to_string())
+        .bind(now.to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .map_err(map_repo_err)?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn list_with_expired_leases(
+        &self,
+        workspace_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> DomainResult<Vec<Publication>> {
+        let rows = sqlx::query(&format!(
+            "SELECT {SELECT_COLUMNS} FROM publications \
+             WHERE workspace_id = ? AND status IN ('uploading', 'processing') \
+             AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?"
+        ))
+        .bind(workspace_id.to_string())
+        .bind(now.to_rfc3339())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_repo_err)?;
+        rows.iter().map(row_to_publication).collect()
+    }
 }
 
 fn apply_filters(builder: &mut QueryBuilder<Sqlite>, query: &PublicationListQuery) {
@@ -430,5 +503,213 @@ fn apply_filters(builder: &mut QueryBuilder<Sqlite>, query: &PublicationListQuer
             let pattern = format!("%{}%", search.trim());
             builder.push(" AND title LIKE ").push_bind(pattern);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::video_status::VideoPriority;
+    use crate::test_support::*;
+
+    async fn seed_scheduled_publication(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+        channel_id: Uuid,
+        video_id: Uuid,
+        scheduled_at: DateTime<Utc>,
+    ) -> Publication {
+        let mut publication = Publication::new(
+            workspace_id,
+            video_id,
+            channel_id,
+            Platform::YouTube,
+            "Test publication",
+            VideoPriority::Normal,
+        );
+        publication.status = PublicationStatus::Scheduled;
+        publication.scheduled_at = Some(scheduled_at);
+        let repo = SqlitePublicationRepository::new(pool.clone());
+        repo.create(&publication).await.unwrap();
+        publication
+    }
+
+    #[tokio::test]
+    async fn try_claim_due_wins_for_a_due_unlocked_scheduled_publication() {
+        let pool = temp_pool("pub-repo-claim").await;
+        let (workspace_id, source_id) = seed_workspace_and_source(&pool).await;
+        let channel_id = seed_channel(&pool, workspace_id, "Channel").await;
+        let video_id = seed_video(&pool, workspace_id, source_id, Some(channel_id), "video").await;
+        let publication = seed_scheduled_publication(
+            &pool,
+            workspace_id,
+            channel_id,
+            video_id,
+            Utc::now() - chrono::Duration::minutes(1),
+        )
+        .await;
+        let repo = SqlitePublicationRepository::new(pool.clone());
+
+        let won = repo
+            .try_claim_due(
+                publication.id,
+                Uuid::new_v4(),
+                "claim-token-1",
+                Utc::now() + chrono::Duration::minutes(30),
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+        assert!(won);
+
+        let reloaded = repo.get(publication.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.status, PublicationStatus::Uploading);
+        assert!(reloaded.execution_key.is_some());
+        assert_eq!(reloaded.claim_token.as_deref(), Some("claim-token-1"));
+    }
+
+    #[tokio::test]
+    async fn two_concurrent_claims_on_the_same_publication_only_one_wins() {
+        let pool = temp_pool("pub-repo-claim-race").await;
+        let (workspace_id, source_id) = seed_workspace_and_source(&pool).await;
+        let channel_id = seed_channel(&pool, workspace_id, "Channel").await;
+        let video_id = seed_video(&pool, workspace_id, source_id, Some(channel_id), "video").await;
+        let publication = seed_scheduled_publication(
+            &pool,
+            workspace_id,
+            channel_id,
+            video_id,
+            Utc::now() - chrono::Duration::minutes(1),
+        )
+        .await;
+        let repo = SqlitePublicationRepository::new(pool.clone());
+
+        let now = Utc::now();
+        let lease = now + chrono::Duration::minutes(30);
+        let (a, b) = tokio::join!(
+            repo.try_claim_due(publication.id, Uuid::new_v4(), "claim-a", lease, now),
+            repo.try_claim_due(publication.id, Uuid::new_v4(), "claim-b", lease, now)
+        );
+        let wins = [a.unwrap(), b.unwrap()].into_iter().filter(|w| *w).count();
+        assert_eq!(wins, 1, "exactly one of two concurrent claims should win");
+    }
+
+    #[tokio::test]
+    async fn a_locked_publication_is_never_claimed() {
+        let pool = temp_pool("pub-repo-claim-locked").await;
+        let (workspace_id, source_id) = seed_workspace_and_source(&pool).await;
+        let channel_id = seed_channel(&pool, workspace_id, "Channel").await;
+        let video_id = seed_video(&pool, workspace_id, source_id, Some(channel_id), "video").await;
+        let mut publication = seed_scheduled_publication(
+            &pool,
+            workspace_id,
+            channel_id,
+            video_id,
+            Utc::now() - chrono::Duration::minutes(1),
+        )
+        .await;
+        publication.locked = true;
+        let repo = SqlitePublicationRepository::new(pool.clone());
+        repo.update(&publication).await.unwrap();
+
+        let won = repo
+            .try_claim_due(
+                publication.id,
+                Uuid::new_v4(),
+                "claim-token",
+                Utc::now() + chrono::Duration::minutes(30),
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+        assert!(!won);
+    }
+
+    #[tokio::test]
+    async fn retrying_the_same_publication_reuses_its_execution_key() {
+        let pool = temp_pool("pub-repo-claim-reuse-key").await;
+        let (workspace_id, source_id) = seed_workspace_and_source(&pool).await;
+        let channel_id = seed_channel(&pool, workspace_id, "Channel").await;
+        let video_id = seed_video(&pool, workspace_id, source_id, Some(channel_id), "video").await;
+        let publication = seed_scheduled_publication(
+            &pool,
+            workspace_id,
+            channel_id,
+            video_id,
+            Utc::now() - chrono::Duration::minutes(1),
+        )
+        .await;
+        let repo = SqlitePublicationRepository::new(pool.clone());
+        let lease = Utc::now() + chrono::Duration::minutes(30);
+
+        repo.try_claim_due(publication.id, Uuid::new_v4(), "claim-1", lease, Utc::now())
+            .await
+            .unwrap();
+        let first_key = repo
+            .get(publication.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .execution_key;
+
+        // Simulate the failure/retry cycle: back to Scheduled, claim again.
+        let mut reloaded = repo.get(publication.id).await.unwrap().unwrap();
+        reloaded.status = PublicationStatus::Scheduled;
+        repo.update(&reloaded).await.unwrap();
+
+        repo.try_claim_due(publication.id, Uuid::new_v4(), "claim-2", lease, Utc::now())
+            .await
+            .unwrap();
+        let second_key = repo
+            .get(publication.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .execution_key;
+
+        assert_eq!(first_key, second_key);
+    }
+
+    #[tokio::test]
+    async fn list_with_expired_leases_only_returns_abandoned_claims() {
+        let pool = temp_pool("pub-repo-expired-leases").await;
+        let (workspace_id, source_id) = seed_workspace_and_source(&pool).await;
+        let channel_id = seed_channel(&pool, workspace_id, "Channel").await;
+        let video_id = seed_video(&pool, workspace_id, source_id, Some(channel_id), "video").await;
+        let repo = SqlitePublicationRepository::new(pool.clone());
+
+        let expired =
+            seed_scheduled_publication(&pool, workspace_id, channel_id, video_id, Utc::now()).await;
+        repo.try_claim_due(
+            expired.id,
+            Uuid::new_v4(),
+            "t1",
+            Utc::now() - chrono::Duration::minutes(1),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+
+        let fresh_video =
+            seed_video(&pool, workspace_id, source_id, Some(channel_id), "video2").await;
+        let fresh =
+            seed_scheduled_publication(&pool, workspace_id, channel_id, fresh_video, Utc::now())
+                .await;
+        repo.try_claim_due(
+            fresh.id,
+            Uuid::new_v4(),
+            "t2",
+            Utc::now() + chrono::Duration::minutes(30),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+
+        let expired_leases = repo
+            .list_with_expired_leases(workspace_id, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(expired_leases.len(), 1);
+        assert_eq!(expired_leases[0].id, expired.id);
     }
 }

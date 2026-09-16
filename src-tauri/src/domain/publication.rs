@@ -160,6 +160,23 @@ pub struct Publication {
     pub remote_id: Option<String>,
     pub retry_count: i32,
     pub last_error: Option<String>,
+    /// Section 67 — the identity a retry reuses across attempts; a
+    /// deliberate user-initiated repost gets a *new* execution key
+    /// instead (section 3), so "same execution key" is exactly XP FLOW's
+    /// definition of "the same logical remote write."
+    pub execution_key: Option<Uuid>,
+    /// Section 13 — proves current ownership of an active claim; cleared
+    /// whenever the publication leaves `Uploading`/`Processing`.
+    pub claim_token: Option<String>,
+    /// Section 13/88 — a claim past this instant is considered abandoned
+    /// (the process that made it may have crashed) and eligible for
+    /// crash-recovery reconciliation.
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    /// Section 103 — the exact metadata sent for the current/most recent
+    /// attempt, frozen the moment execution starts so a later template
+    /// edit can never retroactively change what an in-flight or already-
+    /// executed attempt claims it sent.
+    pub rendered_metadata: Option<crate::domain::publishing::RenderedMetadata>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -192,6 +209,10 @@ impl Publication {
             remote_id: None,
             retry_count: 0,
             last_error: None,
+            execution_key: None,
+            claim_token: None,
+            lease_expires_at: None,
+            rendered_metadata: None,
             created_at: now,
             updated_at: now,
         }

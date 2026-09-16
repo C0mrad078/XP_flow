@@ -182,6 +182,36 @@ pub trait PublicationRepository: Send + Sync {
         &self,
         workspace_id: Uuid,
     ) -> DomainResult<Vec<(Uuid, i64)>>;
+
+    /// Atomically claims one due, unlocked, still-`Scheduled` publication
+    /// for execution — `Scheduled -> Uploading` only succeeds if the row
+    /// is exactly in that state when the `UPDATE ... WHERE` runs, so two
+    /// concurrent callers (a periodic scan tick and a manual "Publish
+    /// Now," or two overlapping ticks) can never both win the same
+    /// publication (section 12/13/66). `execution_key` is only set if
+    /// still `NULL` — a retry reuses the same key; a claim never
+    /// generates a new one for a publication that already has one.
+    /// Returns `true` iff this call won the claim.
+    #[allow(clippy::too_many_arguments)]
+    async fn try_claim_due(
+        &self,
+        id: Uuid,
+        candidate_execution_key: Uuid,
+        claim_token: &str,
+        lease_expires_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> DomainResult<bool>;
+
+    /// `Uploading`/`Processing` publications whose lease has already
+    /// expired — an abandoned claim from a process that crashed before
+    /// releasing it (section 13/88). The crash-recovery pass reconciles
+    /// each of these against its persisted attempt/session state before
+    /// anything is allowed to touch them again.
+    async fn list_with_expired_leases(
+        &self,
+        workspace_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> DomainResult<Vec<Publication>>;
 }
 
 #[async_trait]
