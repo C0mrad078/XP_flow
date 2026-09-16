@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CalendarClock, Eye, ListVideo, Radio, TrendingUp } from "lucide-react";
+import { AlertTriangle, CalendarClock, ListVideo, Radio, TrendingUp } from "lucide-react";
 
 import { PageContainer } from "@/components/common/page-container";
 import { PageHeader } from "@/components/common/page-header";
@@ -12,14 +12,10 @@ import { activityApi } from "@/lib/tauri";
 import { PlatformHealthSummary } from "@/features/integrations/platform-health-summary";
 import { useChannels } from "@/hooks/use-channels";
 import { useQueueList } from "@/hooks/use-queue";
-import { formatCompactNumber, formatPercent } from "@/lib/formatting/number";
+import { formatCompactNumber } from "@/lib/formatting/number";
 import { formatRelativeTime, formatTimeInZone } from "@/lib/formatting/date";
 import { mockActivityEvents } from "@/development/mock-data/activity";
-import {
-  mockDashboardMetrics,
-  mockPlatformOverview,
-  mockViewsSeries,
-} from "@/development/mock-data/dashboard";
+import { mockPlatformOverview, mockViewsSeries } from "@/development/mock-data/dashboard";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import type { ActivityEvent } from "@/types/domain";
 
@@ -29,7 +25,19 @@ export function DashboardPage() {
   const { data: channels = [] } = useChannels();
   const channelNames = new Map(channels.map((c) => [c.id, c.name]));
   const { data: queuePage } = useQueueList({
-    statuses: ["queued", "scheduled"],
+    statuses: [
+      "queued",
+      "scheduled",
+      "uploading",
+      "processing",
+      "published",
+      "failed",
+      "retry_wait",
+      "rate_limited",
+      "auth_required",
+      "blocked",
+      "paused",
+    ],
     sort: "queue_order",
     page_size: 4,
   });
@@ -52,7 +60,19 @@ export function DashboardPage() {
     };
   }, []);
 
-  const metrics = mockDashboardMetrics;
+  const publications = queuePage?.items ?? [];
+  const publishingNow = publications.filter(
+    (p) => p.status === "uploading" || p.status === "processing",
+  ).length;
+  const needsAttention = publications.filter((p) =>
+    ["failed", "rate_limited", "auth_required", "blocked"].includes(p.status),
+  ).length;
+  const publishedToday = publications.filter(
+    (p) =>
+      p.status === "published" &&
+      p.published_at &&
+      new Date(p.published_at).toDateString() === new Date().toDateString(),
+  ).length;
 
   return (
     <PageContainer>
@@ -62,38 +82,27 @@ export function DashboardPage() {
         <Card>
           <CardContent className="p-5">
             <Metric
-              label="Total views"
-              value={formatCompactNumber(metrics.totalViews)}
-              icon={Eye}
-              trend={{ direction: "up", value: formatPercent(metrics.totalViewsTrend) }}
-            />
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="p-5">
-            <Metric
-              label="Published today"
-              value={`${metrics.publishedToday}/${metrics.publishedTodayTarget}`}
-              icon={CalendarClock}
-            />
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="p-5">
-            <Metric
-              label="Queued posts"
-              value={String(queuePage?.total ?? metrics.queuedPosts)}
+              label="Scheduled posts"
+              value={String(
+                publications.filter((p) => p.status === "scheduled" || p.status === "queued").length,
+              )}
               icon={ListVideo}
             />
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-5">
-            <Metric
-              label="Active channels"
-              value={`${metrics.activeChannels}/${metrics.totalChannels}`}
-              icon={Radio}
-            />
+            <Metric label="Published today" value={String(publishedToday)} icon={CalendarClock} />
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-5">
+            <Metric label="Queued posts" value={String(publishingNow)} icon={Radio} />
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-5">
+            <Metric label="Active channels" value={String(needsAttention)} icon={AlertTriangle} />
           </CardContent>
         </Card>
       </div>
