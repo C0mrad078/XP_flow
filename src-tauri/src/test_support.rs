@@ -123,6 +123,53 @@ pub fn write_fake_video(dir: &Path, filename: &str, bytes: &[u8]) -> PathBuf {
     path
 }
 
+/// Inserts a minimal, valid `publications` row (Imported status) for
+/// Phase 5 tests that need a real publication_id to satisfy a foreign
+/// key — the queue/scheduler seams this bypasses aren't what's under
+/// test in those cases.
+pub async fn seed_publication(
+    pool: &SqlitePool,
+    workspace_id: Uuid,
+    channel_id: Uuid,
+    video_id: Uuid,
+) -> Uuid {
+    use crate::domain::platform::Platform;
+    use crate::domain::ports::repositories::PublicationRepository;
+    use crate::domain::publication::Publication;
+    use crate::domain::video_status::VideoPriority;
+
+    let publication = Publication::new(
+        workspace_id,
+        video_id,
+        channel_id,
+        Platform::YouTube,
+        "Test publication",
+        VideoPriority::Normal,
+    );
+    let repo = crate::infrastructure::repositories::SqlitePublicationRepository::new(pool.clone());
+    repo.create(&publication).await.unwrap();
+    publication.id
+}
+
+/// Inserts a minimal `platform_accounts` row for tests that need a real
+/// platform_account_id to satisfy a foreign key.
+pub async fn seed_platform_account(
+    pool: &SqlitePool,
+    workspace_id: Uuid,
+    channel_id: Uuid,
+) -> Uuid {
+    let account = crate::domain::platform_account::PlatformAccount::new(
+        workspace_id,
+        channel_id,
+        crate::domain::platform::Platform::YouTube,
+    );
+    use crate::domain::ports::repositories::PlatformAccountRepository;
+    let repo =
+        crate::infrastructure::repositories::SqlitePlatformAccountRepository::new(pool.clone());
+    repo.create(&account).await.unwrap();
+    account.id
+}
+
 /// Returns a fixed, valid-looking probe result for every file — configure
 /// per-path overrides via `set_probe` for invalid/corrupted cases.
 pub struct FakeProbeService {

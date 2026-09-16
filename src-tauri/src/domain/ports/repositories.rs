@@ -12,6 +12,9 @@ use crate::domain::platform::Platform;
 use crate::domain::platform_account::PlatformAccount;
 use crate::domain::publication::Publication;
 use crate::domain::publication_query::{PublicationListQuery, PublicationPage};
+use crate::domain::publishing::{
+    HashtagSet, MetadataTemplate, PublicationAttempt, PublicationConsent, UploadSession,
+};
 use crate::domain::queue_item::QueueItem;
 use crate::domain::schedule_exception::ScheduleException;
 use crate::domain::schedule_slot::ScheduleSlot;
@@ -127,10 +130,50 @@ pub trait DuplicateMatchRepository: Send + Sync {
     async fn list_for_video(&self, video_id: Uuid) -> DomainResult<Vec<DuplicateMatch>>;
 }
 
+/// What `PublicationRepository::update_execution_state` is allowed to
+/// change — deliberately not the same field set as the rest of
+/// `Publication`, and deliberately guarded on `claim_token` (see that
+/// method's doc comment).
+pub struct ExecutionStateUpdate {
+    pub status: crate::domain::publication::PublicationStatus,
+    pub remote_id: Option<String>,
+    pub retry_count: i32,
+    pub last_error: Option<String>,
+    pub rendered_metadata_json: Option<String>,
+    pub release_claim: bool,
+    pub new_lease_expires_at: Option<DateTime<Utc>>,
+}
+
 #[async_trait]
 pub trait PublicationRepository: Send + Sync {
     async fn create(&self, publication: &Publication) -> DomainResult<()>;
+    /// Persists every field *except* `execution_key`/`claim_token`/
+    /// `lease_expires_at`/`rendered_metadata_json` (section 13/66's
+    /// correctness requirement, added after an audit finding: a generic
+    /// read-modify-write `update()` call from an unrelated flow —
+    /// reschedule, cancel, a title edit — must never blindly clobber
+    /// those fields with whatever stale value happened to be in memory
+    /// when it loaded the row, which could silently erase a
+    /// concurrently-made claim and let the same publication be claimed
+    /// and executed twice. Callers that need to change execution state
+    /// use `update_execution_state` instead, which is guarded on still
+    /// holding the current claim token.
     async fn update(&self, publication: &Publication) -> DomainResult<()>;
+
+    /// Updates only the fields the Publishing Engine owns for the
+    /// duration of a claim, guarded on the caller still holding the
+    /// exact `claim_token` it was issued by `try_claim_due` — a stale
+    /// caller (its claim already expired and reclaimed by someone else,
+    /// or already released) simply matches zero rows instead of
+    /// overwriting whatever the new owner has done since. Returns
+    /// `false` (not an error) in that case; callers must treat it as
+    /// "someone else now owns this," never retry blindly.
+    async fn update_execution_state(
+        &self,
+        id: Uuid,
+        claim_token: &str,
+        update: &ExecutionStateUpdate,
+    ) -> DomainResult<bool>;
     /// Persists every publication in `publications` inside a single
     /// database transaction — all-or-nothing. Used by bulk scheduling
     /// operations (auto-schedule, rebuild, fill-gaps) so a mid-batch slot
@@ -290,4 +333,89 @@ pub trait NotificationRepository: Send + Sync {
 pub trait SettingsRepository: Send + Sync {
     async fn get(&self) -> DomainResult<AppSettings>;
     async fn save(&self, settings: &AppSettings) -> DomainResult<()>;
+}
+
+/// Durable attempt history (section 9) — never overwritten, one row per
+/// execution attempt.
+#[async_trait]
+pub trait PublicationAttemptRepository: Send + Sync {
+    async fn create(&self, attempt: &PublicationAttempt) -> DomainResult<()>;
+    async fn update(&self, attempt: &PublicationAttempt) -> DomainResult<()>;
+    async fn get(&self, id: Uuid) -> DomainResult<Option<PublicationAttempt>>;
+    /// Newest first — what the Publication Details drawer's attempt
+    /// history renders directly.
+    async fn list_for_publication(
+        &self,
+        publication_id: Uuid,
+    ) -> DomainResult<Vec<PublicationAttempt>>;
+    /// The highest `attempt_number` recorded for this publication, or 0
+    /// if none exist yet (the next attempt is this + 1).
+    async fn max_attempt_number(&self, publication_id: Uuid) -> DomainResult<i32>;
+}
+
+/// Recoverable upload progress (section 10).
+#[async_trait]
+pub trait UploadSessionRepository: Send + Sync {
+    async fn create(&self, session: &UploadSession) -> DomainResult<()>;
+    async fn update(&self, session: &UploadSession) -> DomainResult<()>;
+    async fn get(&self, id: Uuid) -> DomainResult<Option<UploadSession>>;
+    /// The most recent session for a publication — what a crash-recovery
+    /// pass loads first (section 88).
+    async fn latest_for_publication(
+        &self,
+        publication_id: Uuid,
+    ) -> DomainResult<Option<UploadSession>>;
+}
+
+/// TikTok express-consent records (section 31-34).
+#[async_trait]
+pub trait PublicationConsentRepository: Send + Sync {
+    async fn create(&self, consent: &PublicationConsent) -> DomainResult<()>;
+    /// The most recent consent row for a publication, if any — callers
+    /// compare its `approved_metadata_hash` against the current rendered
+    /// metadata to decide whether it still covers the pending attempt.
+    async fn latest_for_publication(
+        &self,
+        publication_id: Uuid,
+    ) -> DomainResult<Option<PublicationConsent>>;
+}
+
+/// Reusable title/description templates (section 22-26).
+#[async_trait]
+pub trait MetadataTemplateRepository: Send + Sync {
+    async fn create(&self, template: &MetadataTemplate) -> DomainResult<()>;
+    async fn update(&self, template: &MetadataTemplate) -> DomainResult<()>;
+    async fn delete(&self, id: Uuid) -> DomainResult<()>;
+    async fn get(&self, id: Uuid) -> DomainResult<Option<MetadataTemplate>>;
+    async fn list_for_workspace(&self, workspace_id: Uuid) -> DomainResult<Vec<MetadataTemplate>>;
+}
+
+/// Reusable hashtag groups (section 27).
+#[async_trait]
+pub trait HashtagSetRepository: Send + Sync {
+    async fn create(&self, set: &HashtagSet) -> DomainResult<()>;
+    async fn update(&self, set: &HashtagSet) -> DomainResult<()>;
+    async fn delete(&self, id: Uuid) -> DomainResult<()>;
+    async fn get(&self, id: Uuid) -> DomainResult<Option<HashtagSet>>;
+    async fn list_for_workspace(&self, workspace_id: Uuid) -> DomainResult<Vec<HashtagSet>>;
+}
+
+/// Thin rate-limit bookkeeping (section 78/101/129-130) — records only
+/// what a provider actually told us, never a synthesized quota number.
+#[async_trait]
+pub trait ProviderRateStateRepository: Send + Sync {
+    async fn record_rate_limit(
+        &self,
+        platform_account_id: Uuid,
+        operation: &str,
+        retry_after: DateTime<Utc>,
+    ) -> DomainResult<()>;
+    /// `None` if never rate-limited, or the last recorded `Retry-After`
+    /// instant (which may already be in the past — callers compare it
+    /// against `now` themselves).
+    async fn get_retry_after(
+        &self,
+        platform_account_id: Uuid,
+        operation: &str,
+    ) -> DomainResult<Option<DateTime<Utc>>>;
 }

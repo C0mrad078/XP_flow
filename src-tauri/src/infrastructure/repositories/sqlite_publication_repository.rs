@@ -146,11 +146,30 @@ impl PublicationRepository for SqlitePublicationRepository {
     }
 
     async fn update(&self, publication: &Publication) -> DomainResult<()> {
-        sqlx::query(
+        // Deliberately excludes execution_key/claim_token/lease_expires_at/
+        // rendered_metadata_json — see the trait doc comment. A caller
+        // here (reschedule, cancel, a metadata edit) leaves those columns
+        // exactly as they are in the database, regardless of whatever
+        // stale value is sitting in `publication`'s in-memory copy of them.
+        //
+        // The `status NOT IN ('uploading', 'processing')` guard closes a
+        // second, sharper version of the same hazard: without it, a
+        // read-modify-write from an unrelated flow (its in-memory copy
+        // loaded *before* the Publishing Engine claimed this row) would
+        // silently revert `status` from `uploading` back to whatever it
+        // was at read time — e.g. `scheduled` — which would make this
+        // publication look due again to the next claim scan while the
+        // original upload is still genuinely in flight, and hand it out
+        // a second time. Once the engine owns a row, only
+        // `update_execution_state` (guarded on the live claim token) may
+        // touch it; a generic `update()` call against a currently-
+        // claimed row affects zero rows and reports `Conflict` instead
+        // of silently doing nothing.
+        let result = sqlx::query(
             "UPDATE publications SET platform_account_id = ?, status = ?, title = ?, description = ?, hashtags_json = ?, \
              priority = ?, locked = ?, scheduled_at = ?, published_at = ?, remote_id = ?, retry_count = ?, last_error = ?, \
-             execution_key = ?, claim_token = ?, lease_expires_at = ?, rendered_metadata_json = ?, updated_at = ? \
-             WHERE id = ?",
+             updated_at = ? \
+             WHERE id = ? AND status NOT IN ('uploading', 'processing')",
         )
         .bind(publication.platform_account_id.map(|id| id.to_string()))
         .bind(publication.status.as_str())
@@ -164,15 +183,6 @@ impl PublicationRepository for SqlitePublicationRepository {
         .bind(&publication.remote_id)
         .bind(publication.retry_count)
         .bind(&publication.last_error)
-        .bind(publication.execution_key.map(|id| id.to_string()))
-        .bind(&publication.claim_token)
-        .bind(publication.lease_expires_at.map(|dt| dt.to_rfc3339()))
-        .bind(
-            publication
-                .rendered_metadata
-                .as_ref()
-                .map(|m| serde_json::to_string(m).unwrap_or_default()),
-        )
         .bind(publication.updated_at.to_rfc3339())
         .bind(publication.id.to_string())
         .execute(&self.pool)
@@ -183,7 +193,49 @@ impl PublicationRepository for SqlitePublicationRepository {
             }
             other => map_repo_err(other),
         })?;
+        if result.rows_affected() == 0 {
+            return Err(DomainError::Conflict(
+                "this publication is currently being published and can't be modified right now"
+                    .to_string(),
+            ));
+        }
         Ok(())
+    }
+
+    async fn update_execution_state(
+        &self,
+        id: Uuid,
+        claim_token: &str,
+        update: &crate::domain::ports::repositories::ExecutionStateUpdate,
+    ) -> DomainResult<bool> {
+        let (new_claim_token, new_lease_expires_at): (Option<&str>, Option<String>) =
+            if update.release_claim {
+                (None, None)
+            } else {
+                (
+                    Some(claim_token),
+                    update.new_lease_expires_at.map(|dt| dt.to_rfc3339()),
+                )
+            };
+        let result = sqlx::query(
+            "UPDATE publications SET status = ?, remote_id = ?, retry_count = ?, last_error = ?, \
+             rendered_metadata_json = ?, claim_token = ?, lease_expires_at = ?, updated_at = ? \
+             WHERE id = ? AND claim_token = ?",
+        )
+        .bind(update.status.as_str())
+        .bind(&update.remote_id)
+        .bind(update.retry_count)
+        .bind(&update.last_error)
+        .bind(&update.rendered_metadata_json)
+        .bind(new_claim_token)
+        .bind(new_lease_expires_at)
+        .bind(Utc::now().to_rfc3339())
+        .bind(id.to_string())
+        .bind(claim_token)
+        .execute(&self.pool)
+        .await
+        .map_err(map_repo_err)?;
+        Ok(result.rows_affected() == 1)
     }
 
     async fn bulk_update(&self, publications: &[Publication]) -> DomainResult<()> {
@@ -194,10 +246,13 @@ impl PublicationRepository for SqlitePublicationRepository {
         let mut tx = self.pool.begin().await.map_err(map_repo_err)?;
 
         for publication in publications {
+            // Same claimed-row guard as `update()` — a bulk reschedule/
+            // rebuild must never revert a publication the Publishing
+            // Engine currently owns back to a pre-claim status.
             let result = sqlx::query(
                 "UPDATE publications SET platform_account_id = ?, status = ?, title = ?, description = ?, hashtags_json = ?, \
                  priority = ?, locked = ?, scheduled_at = ?, published_at = ?, remote_id = ?, retry_count = ?, last_error = ?, updated_at = ? \
-                 WHERE id = ?",
+                 WHERE id = ? AND status NOT IN ('uploading', 'processing')",
             )
             .bind(publication.platform_account_id.map(|id| id.to_string()))
             .bind(publication.status.as_str())
@@ -217,7 +272,14 @@ impl PublicationRepository for SqlitePublicationRepository {
             .await;
 
             match result {
-                Ok(_) => {}
+                Ok(outcome) if outcome.rows_affected() == 1 => {}
+                Ok(_) => {
+                    let _ = tx.rollback().await;
+                    return Err(DomainError::BulkScheduleFailed(format!(
+                        "publication {} is currently being published and can't be rescheduled",
+                        publication.id
+                    )));
+                }
                 Err(sqlx::Error::Database(ref db_err)) if db_err.is_unique_violation() => {
                     let _ = tx.rollback().await;
                     return Err(DomainError::BulkScheduleFailed(format!(
@@ -652,9 +714,29 @@ mod tests {
             .unwrap()
             .execution_key;
 
-        // Simulate the failure/retry cycle: back to Scheduled, claim again.
+        // Simulate the failure/retry cycle through the real state machine:
+        // Uploading -> Failed (releasing the claim) -> RetryWait -> Queued
+        // -> Scheduled -> claimed again.
+        repo.update_execution_state(
+            publication.id,
+            "claim-1",
+            &crate::domain::ports::repositories::ExecutionStateUpdate {
+                status: PublicationStatus::Failed,
+                remote_id: None,
+                retry_count: 1,
+                last_error: Some("network error".to_string()),
+                rendered_metadata_json: None,
+                release_claim: true,
+                new_lease_expires_at: None,
+            },
+        )
+        .await
+        .unwrap();
+
         let mut reloaded = repo.get(publication.id).await.unwrap().unwrap();
-        reloaded.status = PublicationStatus::Scheduled;
+        reloaded.transition(PublicationStatus::RetryWait).unwrap();
+        reloaded.transition(PublicationStatus::Queued).unwrap();
+        reloaded.transition(PublicationStatus::Scheduled).unwrap();
         repo.update(&reloaded).await.unwrap();
 
         repo.try_claim_due(publication.id, Uuid::new_v4(), "claim-2", lease, Utc::now())
@@ -711,5 +793,100 @@ mod tests {
             .unwrap();
         assert_eq!(expired_leases.len(), 1);
         assert_eq!(expired_leases[0].id, expired.id);
+    }
+
+    #[tokio::test]
+    async fn update_execution_state_succeeds_only_for_the_current_claim_token() {
+        let pool = temp_pool("pub-repo-exec-state").await;
+        let (workspace_id, source_id) = seed_workspace_and_source(&pool).await;
+        let channel_id = seed_channel(&pool, workspace_id, "Channel").await;
+        let video_id = seed_video(&pool, workspace_id, source_id, Some(channel_id), "video").await;
+        let publication =
+            seed_scheduled_publication(&pool, workspace_id, channel_id, video_id, Utc::now()).await;
+        let repo = SqlitePublicationRepository::new(pool.clone());
+        repo.try_claim_due(
+            publication.id,
+            Uuid::new_v4(),
+            "real-claim-token",
+            Utc::now() + chrono::Duration::minutes(30),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+
+        let update = crate::domain::ports::repositories::ExecutionStateUpdate {
+            status: PublicationStatus::Processing,
+            remote_id: Some("remote-1".to_string()),
+            retry_count: 0,
+            last_error: None,
+            rendered_metadata_json: None,
+            release_claim: false,
+            new_lease_expires_at: Some(Utc::now() + chrono::Duration::minutes(45)),
+        };
+
+        // A stale/wrong token must be rejected, not silently applied.
+        let stale_result = repo
+            .update_execution_state(publication.id, "wrong-token", &update)
+            .await
+            .unwrap();
+        assert!(!stale_result);
+        let unchanged = repo.get(publication.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.status, PublicationStatus::Uploading);
+
+        // The real token succeeds.
+        let real_result = repo
+            .update_execution_state(publication.id, "real-claim-token", &update)
+            .await
+            .unwrap();
+        assert!(real_result);
+        let updated = repo.get(publication.id).await.unwrap().unwrap();
+        assert_eq!(updated.status, PublicationStatus::Processing);
+        assert_eq!(updated.remote_id.as_deref(), Some("remote-1"));
+        assert_eq!(updated.claim_token.as_deref(), Some("real-claim-token"));
+    }
+
+    #[tokio::test]
+    async fn a_generic_update_against_a_currently_claimed_row_fails_loudly_instead_of_reverting_it()
+    {
+        let pool = temp_pool("pub-repo-generic-update-safe").await;
+        let (workspace_id, source_id) = seed_workspace_and_source(&pool).await;
+        let channel_id = seed_channel(&pool, workspace_id, "Channel").await;
+        let video_id = seed_video(&pool, workspace_id, source_id, Some(channel_id), "video").await;
+        let publication =
+            seed_scheduled_publication(&pool, workspace_id, channel_id, video_id, Utc::now()).await;
+        let repo = SqlitePublicationRepository::new(pool.clone());
+        repo.try_claim_due(
+            publication.id,
+            Uuid::new_v4(),
+            "active-claim",
+            Utc::now() + chrono::Duration::minutes(30),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+
+        // Simulates an unrelated flow (e.g. a title edit) that loaded the
+        // publication *before* the claim above, still holding a stale
+        // (Scheduled) status and empty claim fields in memory.
+        let mut stale_in_memory_copy = publication.clone();
+        stale_in_memory_copy.title = "Edited title".to_string();
+        let result = repo.update(&stale_in_memory_copy).await;
+
+        assert!(
+            matches!(result, Err(DomainError::Conflict(_))),
+            "an update against a claimed row must fail, not silently revert the claim"
+        );
+
+        let reloaded = repo.get(publication.id).await.unwrap().unwrap();
+        assert_eq!(
+            reloaded.title, "Test publication",
+            "the edit must not have applied"
+        );
+        assert_eq!(
+            reloaded.status,
+            PublicationStatus::Uploading,
+            "the concurrently-made claim's status must survive the rejected update"
+        );
+        assert_eq!(reloaded.claim_token.as_deref(), Some("active-claim"));
     }
 }
