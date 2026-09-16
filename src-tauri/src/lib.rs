@@ -56,10 +56,10 @@ use infrastructure::publishing::StubPublisher;
 use infrastructure::repositories::{
     SqliteActivityRepository, SqliteChannelRepository, SqliteDuplicateMatchRepository,
     SqliteJobRepository, SqliteNotificationRepository, SqlitePlatformAccountRepository,
-    SqlitePublicationAttemptRepository, SqlitePublicationRepository, SqliteQueueItemRepository,
-    SqliteScheduleExceptionRepository, SqliteScheduleSlotRepository, SqliteSettingsRepository,
-    SqliteUploadSessionRepository, SqliteVideoRepository, SqliteVideoSourceRepository,
-    SqliteWorkspaceRepository,
+    SqlitePublicationAttemptRepository, SqlitePublicationConsentRepository,
+    SqlitePublicationRepository, SqliteQueueItemRepository, SqliteScheduleExceptionRepository,
+    SqliteScheduleSlotRepository, SqliteSettingsRepository, SqliteUploadSessionRepository,
+    SqliteVideoRepository, SqliteVideoSourceRepository, SqliteWorkspaceRepository,
 };
 use infrastructure::watcher::FolderWatcherService;
 use jobs::JobRepository;
@@ -467,6 +467,7 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         video_repo.clone(),
         platform_account_repo,
         channel_repo.clone(),
+        Arc::new(SqlitePublicationConsentRepository::new(pool.clone())),
         hash_service.clone(),
         credential_service,
         publishers,

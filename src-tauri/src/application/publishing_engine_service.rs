@@ -15,7 +15,8 @@ use crate::domain::ports::hashing::ContentHashService;
 use crate::domain::ports::platform_publisher::{CancelSignal, PlatformPublisher};
 use crate::domain::ports::repositories::{
     ChannelRepository, ExecutionStateUpdate, PlatformAccountRepository,
-    PublicationAttemptRepository, PublicationRepository, UploadSessionRepository, VideoRepository,
+    PublicationAttemptRepository, PublicationConsentRepository, PublicationRepository,
+    UploadSessionRepository, VideoRepository,
 };
 use crate::domain::publication::{Publication, PublicationStatus};
 use crate::domain::publishing::retry_policy::{attempts_exhausted, next_retry_at};
@@ -33,6 +34,14 @@ use crate::services::notification_service::NotificationService;
 /// healthy upload.
 const CLAIM_LEASE_DURATION: Duration = Duration::minutes(45);
 
+/// Section 31: only TikTok's Content Posting API requires XP FLOW to
+/// prove explicit per-publication approval before transmitting. YouTube
+/// and Kwai have no equivalent express-consent requirement in their
+/// documented publishing flows.
+fn requires_express_consent(platform: Platform) -> bool {
+    platform == Platform::TikTok
+}
+
 /// Orchestrates one publication's execution end to end (section 3-14):
 /// claim -> credential acquisition -> provider dispatch -> attempt/
 /// session persistence -> status transition. Every write to a
@@ -47,6 +56,7 @@ pub struct PublishingEngineService {
     video_repo: Arc<dyn VideoRepository>,
     platform_account_repo: Arc<dyn PlatformAccountRepository>,
     channel_repo: Arc<dyn ChannelRepository>,
+    consent_repo: Arc<dyn PublicationConsentRepository>,
     content_hash_service: Arc<dyn ContentHashService>,
     credential_service: Arc<CredentialAcquisitionService>,
     publishers: HashMap<Platform, Arc<dyn PlatformPublisher>>,
@@ -63,6 +73,7 @@ impl PublishingEngineService {
         video_repo: Arc<dyn VideoRepository>,
         platform_account_repo: Arc<dyn PlatformAccountRepository>,
         channel_repo: Arc<dyn ChannelRepository>,
+        consent_repo: Arc<dyn PublicationConsentRepository>,
         content_hash_service: Arc<dyn ContentHashService>,
         credential_service: Arc<CredentialAcquisitionService>,
         publishers: HashMap<Platform, Arc<dyn PlatformPublisher>>,
@@ -76,6 +87,7 @@ impl PublishingEngineService {
             video_repo,
             platform_account_repo,
             channel_repo,
+            consent_repo,
             content_hash_service,
             credential_service,
             publishers,
@@ -246,6 +258,27 @@ impl PublishingEngineService {
             return self
                 .fail_and_release(&publication, claim_token, err, 0)
                 .await;
+        }
+
+        // Section 31-34: providers that require express approval (TikTok)
+        // are checked against the *current* rendered metadata's hash —
+        // an approval recorded against different text/options doesn't
+        // count (section 33), and there is no separate "invalidated"
+        // flag to forget to flip.
+        if requires_express_consent(publication.platform) {
+            let current_hash = metadata.consent_hash();
+            let covers = self
+                .consent_repo
+                .latest_for_publication(publication_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|consent| consent.covers(&current_hash));
+            if !covers {
+                return self
+                    .fail_and_release(&publication, claim_token, PublishError::ConsentRequired, 0)
+                    .await;
+            }
         }
 
         self.freeze_metadata(publication_id, claim_token, &metadata)
@@ -829,7 +862,8 @@ mod tests {
     use crate::infrastructure::repositories::{
         SqliteActivityRepository, SqliteChannelRepository, SqliteNotificationRepository,
         SqlitePlatformAccountRepository, SqlitePublicationAttemptRepository,
-        SqlitePublicationRepository, SqliteUploadSessionRepository, SqliteVideoRepository,
+        SqlitePublicationConsentRepository, SqlitePublicationRepository,
+        SqliteUploadSessionRepository, SqliteVideoRepository,
     };
     use crate::test_support::*;
 
@@ -928,6 +962,8 @@ mod tests {
             video_repo.clone() as Arc<dyn VideoRepository>,
             platform_account_repo.clone() as Arc<dyn PlatformAccountRepository>,
             channel_repo as Arc<dyn ChannelRepository>,
+            Arc::new(SqlitePublicationConsentRepository::new(pool.clone()))
+                as Arc<dyn PublicationConsentRepository>,
             Arc::new(Sha256ContentHashService),
             credential_service,
             publishers,
@@ -995,7 +1031,34 @@ mod tests {
         publication.scheduled_at = Some(Utc::now() - Duration::minutes(1));
         let publication_repo = SqlitePublicationRepository::new(pool.clone());
         publication_repo.create(&publication).await.unwrap();
+
+        // The fixtures use TikTok throughout, which requires express
+        // consent (section 31) — seed a matching approval up front so
+        // tests that aren't specifically about consent don't have to
+        // think about it. `metadata_consent_hash_for` mirrors exactly
+        // what `execute_inner` renders from a freshly created
+        // publication, so it must be kept in sync if that rendering ever
+        // changes.
+        let consent_repo = SqlitePublicationConsentRepository::new(pool.clone());
+        let consent = crate::domain::publishing::PublicationConsent::new(
+            publication.id,
+            Platform::TikTok,
+            metadata_consent_hash_for(&publication),
+            crate::domain::publishing::ApprovalSource::AddToQueue,
+        );
+        consent_repo.create(&consent).await.unwrap();
+
         publication.id
+    }
+
+    fn metadata_consent_hash_for(publication: &Publication) -> String {
+        RenderedMetadata {
+            title: publication.title.clone(),
+            description: publication.description.clone().unwrap_or_default(),
+            hashtags: publication.hashtags.clone(),
+            provider_options: serde_json::json!({}),
+        }
+        .consent_hash()
     }
 
     #[tokio::test]
@@ -1260,5 +1323,79 @@ mod tests {
             .scan_and_claim_due(fixture.workspace_id)
             .await;
         assert!(claimed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tiktok_without_a_matching_consent_record_never_reaches_the_provider() {
+        let fixture = build_fixture(FakeScenario::Success).await;
+        let pool = fixture.pool.clone();
+        let publication_id = seed_ready_publication(
+            &pool,
+            fixture.workspace_id,
+            fixture.channel_id,
+            fixture.source_id,
+        )
+        .await;
+        // seed_ready_publication seeds a matching consent by default —
+        // remove it to exercise the "never approved" path.
+        sqlx::query("DELETE FROM publication_consent WHERE publication_id = ?")
+            .bind(publication_id.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let claimed = fixture
+            .engine
+            .scan_and_claim_due(fixture.workspace_id)
+            .await;
+        let (id, claim_token) = claimed.into_iter().next().unwrap();
+        fixture.engine.execute(id, claim_token).await;
+
+        let publication = fixture.publication_repo.get(id).await.unwrap().unwrap();
+        assert_eq!(publication.status, PublicationStatus::Failed);
+        assert_eq!(
+            publication.last_error.as_deref(),
+            Some(PublishError::ConsentRequired.user_message().as_str())
+        );
+        let attempts = fixture.attempt_repo.list_for_publication(id).await.unwrap();
+        assert!(
+            attempts.is_empty(),
+            "no attempt should be created without consent"
+        );
+    }
+
+    #[tokio::test]
+    async fn tiktok_consent_stops_covering_a_publication_once_its_title_changes() {
+        let fixture = build_fixture(FakeScenario::Success).await;
+        let pool = fixture.pool.clone();
+        let publication_id = seed_ready_publication(
+            &pool,
+            fixture.workspace_id,
+            fixture.channel_id,
+            fixture.source_id,
+        )
+        .await;
+
+        // Simulate an edit after approval (section 33): the stored
+        // consent hash no longer matches the (now different) title.
+        sqlx::query("UPDATE publications SET title = 'Edited after approval' WHERE id = ?")
+            .bind(publication_id.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let claimed = fixture
+            .engine
+            .scan_and_claim_due(fixture.workspace_id)
+            .await;
+        let (id, claim_token) = claimed.into_iter().next().unwrap();
+        fixture.engine.execute(id, claim_token).await;
+
+        let publication = fixture.publication_repo.get(id).await.unwrap().unwrap();
+        assert_eq!(publication.status, PublicationStatus::Failed);
+        assert_eq!(
+            publication.last_error.as_deref(),
+            Some(PublishError::ConsentRequired.user_message().as_str())
+        );
     }
 }
