@@ -48,7 +48,7 @@ incomplete, outdated, or simply wrong in places this project has no way to detec
   that case is unverified.
 - **A known, load-bearing gap**: there is no endpoint in the available source to look up "did `upload_token` X ever
   get published" after the fact. If `finalize_publication`'s `publish` call fails ambiguously (timeout, connection
-  drop) *before* a `photo_id` is captured, `recover_upload` cannot verify the outcome at all — it returns the
+  drop) _before_ a `photo_id` is captured, `recover_upload` cannot verify the outcome at all — it returns the
   session as `RemoteUnknown` and stops there. That publication requires a human to check the connected Kwai account
   directly before anything touches it again. This is the honest, safe behavior given the gap — not a bug to be
   silently patched over with a guess.

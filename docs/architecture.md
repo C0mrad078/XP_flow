@@ -113,7 +113,8 @@ src-tauri/src/
 │                        folder-watcher dispatch, startup/periodic reconciliation — see docs/media-library.md §2-3)
 ├── infrastructure/      Concrete adapters implementing domain ports
 │   ├── repositories/    SQLx implementations of the repository traits — the only place SQL is written
-│   ├── connectors/       Stub PlatformConnector (YouTube/TikTok/Kwai) — proves the contract, returns NotImplemented
+│   ├── connectors/       Real PlatformConnector (account lifecycle) + PlatformPublisher (real uploads) per
+│   │                     platform — YouTube/TikTok/Kwai; StubConnector/StubPublisher for an unconfigured platform
 │   ├── media/            FFmpeg/FFprobe detection, binary resolution, structured probing, thumbnail extraction
 │   ├── hashing/          SHA-256 content hashing (streamed) and dHash perceptual hashing
 │   ├── filesystem/       File-stability detection, path normalization, cache accounting, reveal-in-file-manager
@@ -183,14 +184,26 @@ Keychain, Windows Credential Manager, or Linux Secret Service at compile time. P
 platform credential yet — this exists so Phase 2's OAuth work has a tested, working seam instead of inventing one
 under deadline.
 
-### Platform connectors
+### Platform connectors and publishers
 
-`domain::ports::platform_connector::PlatformConnector` is the contract every social platform integration must
-satisfy: `authenticate`, `disconnect`, `validate_session`, `publish_video`, `get_publication_status`,
-`fetch_metrics`, `fetch_comments`. `infrastructure::connectors::StubConnector` implements it for all three platforms
-today, and every method returns `PlatformConnectorError::NotImplemented`. This is intentional: the shape of the
-integration is fixed now, under review, rather than each platform's real implementation inventing its own shape
-later.
+Two separate ports govern a platform integration, split along Phase 4/5's actual boundary between account
+lifecycle and publishing:
+
+- `domain::ports::platform_connector::PlatformConnector` — account-lifecycle operations that have nothing to do
+  with uploading media: `validate_connection`, `refresh_connection`, `disconnect`, `get_profile`,
+  `acquire_access_token`. Real YouTube/TikTok/Kwai implementations exist (`docs/platform-authentication.md`);
+  `StubConnector` is the graceful-degradation fallback for an unconfigured platform.
+- `domain::ports::platform_publisher::PlatformPublisher` — the actual upload contract:
+  `validate_media`/`validate_metadata`, `initialize_upload`, `upload_media`, `finalize_publication`,
+  `get_remote_status`, `recover_upload`, `cancel_upload_if_supported`. Real implementations exist per provider
+  (`docs/publishing-engine.md`); `FakePublisher` (a first-class scripted backend) and `StubPublisher` (the same
+  graceful-degradation pattern) round out the set.
+
+Earlier Phase 4 revisions of `PlatformConnector` carried coarse publishing placeholder methods
+(`publish_video`/`get_publication_status`/`fetch_metrics`/`fetch_comments`, all `NotImplemented`) as a seam for a
+future phase to fill in. Phase 5 removed them entirely rather than filling them in — publishing needed a genuinely
+different, richer contract (chunked transfer, recoverable session state, remote-status polling) than a single
+`publish_video` call could express, so it got its own port instead of overloading `PlatformConnector`.
 
 ### Job foundation
 
@@ -287,17 +300,59 @@ receives or constructs a filesystem path (section 89 of the Phase 2 brief).
 - A real Settings → Integrations screen, and real per-platform connection state (never queue-cancelling) on
   Channels/Queue/Dashboard.
 
-## 9. What a future phase is expected to add on top of this
+## 9. What Phase 5 added
 
-- Real publishing (`PlatformConnector::publish_video`/`get_publication_status`/`fetch_metrics`/`fetch_comments` are
-  defined as a typed `NotImplemented` seam specifically so this shouldn't require touching `domain` or `commands`).
-  `SchedulerService::due_publications`/`PublicationRepository::list_due` already exist as the seam a real uploader
-  would consume.
+- A real, exactly-once publishing engine (`PublishingEngineService`) replacing the Phase 4 "future phase" note
+  below about `PlatformConnector`'s publishing methods — those coarse placeholder methods were removed entirely
+  and replaced by the provider-neutral `PlatformPublisher` port (`domain::ports::platform_publisher`), which
+  `PublishingEngineService` never branches on `Platform` against. See `docs/publishing-engine.md` for the full
+  write-up.
+- A new `domain::publishing` module: `RemoteUploadState` (distinct from `PublicationStatus`), `PublishError` (full
+  classified taxonomy mirroring `AuthError`'s shape), `PublicationAttempt`/`AttemptStatus` (durable, never
+  overwritten), `UploadSession` (recoverable per-attempt provider state, redacting `Debug`), `PublicationConsent`
+  (TikTok's express-consent proof, covering by content hash rather than a boolean), and `RenderedMetadata`/
+  `MetadataTemplate`/`HashtagSet` (the last two not yet wired to a service — see below).
+- Real `PlatformPublisher` implementations for YouTube (resumable upload), TikTok (chunked Direct Post) and Kwai
+  (stepwise fragment upload) — `docs/youtube-publishing.md`, `docs/tiktok-publishing.md`, `docs/kwai-publishing.md`
+  — plus `FakePublisher` (a first-class scripted backend, not test-only) and `StubPublisher` (the same
+  graceful-degradation pattern Phase 4's `StubConnector`/`StubAuthProvider` established).
+  Every provider uploader builds its `reqwest::Client` through `infrastructure::publishing::http_client`, with
+  upload-appropriate timeouts kept deliberately separate from the short-timeout auth client Phase 4 built.
+- Claim/lease concurrency safety at the repository level: `PublicationRepository::try_claim_due` (a single guarded
+  `UPDATE`), `update_execution_state` (claim-token-guarded — the only legitimate way to touch execution state once
+  claimed), and `try_finish_processing` (status-guarded, since polling is idempotent and needs no token). The
+  generic `update()`/`bulk_update()` structurally exclude the four execution-state columns and refuse to run
+  against a currently `Uploading`/`Processing` row, returning `DomainError::Conflict` rather than silently
+  reverting an active claim — a real bug found and fixed during this phase.
+- `domain::readiness::compute_readiness` (noted as unwired in the Phase 4 write-up below) is now wired: a new
+  `PublishingReadinessService` assembles its inputs from real account/video/consent state, exposed via
+  `get_publication_readiness`.
+- New commands: `publish_now`, `retry_publication`, `get_publication_attempts`, `get_publication_readiness`,
+  `record_publication_consent` — `commands::publishing_commands`.
+- `CredentialAcquisitionService` — the single point all publishing code acquires provider access tokens through,
+  and `PlatformAccountRepository::try_begin_refresh`, a true compare-and-swap closing a TOCTOU gap Phase 4's
+  check-then-set refresh pattern left open.
+- The Auth Broker gained one deliberate token-exposing endpoint (`POST /v1/connections/:id/access-token`) — see
+  `docs/auth-broker.md` §8 — the narrow, documented exception to "the broker never returns a raw token," needed so
+  TikTok/Kwai video bytes can still go desktop → provider directly rather than through any XP FLOW server.
+- **No frontend** — see `docs/publishing-engine.md`'s closing section and the README's implementation-status list
+  for exactly what Phase 6 (or later) still needs to build on top of this.
+
+## 10. What a future phase is expected to add on top of this
+
+- Frontend surfaces for everything Phase 5 built: live upload progress, Publication Details attempt history,
+  a metadata editor, Settings → Publishing, a TikTok consent-confirmation dialog, and Queue/Today/Dashboard/Activity
+  screens that reflect real publishing state instead of Phase 3/4 state only.
+- `MetadataTemplateService` — the precedence-resolution service for the `MetadataTemplate`/`HashtagSet` domain
+  types Phase 5 added (Publication override → Channel+Platform → Channel default → Workspace default). Publishing
+  currently renders metadata directly from a Publication's own fields.
+- A rate-limit-aware backoff/concurrency limiter reading real provider `Retry-After` state — `provider_rate_state`
+  has a repository but nothing writes to it yet.
+- A deliberate "repost" action that mints a fresh `execution_key` rather than reusing the one tied to the original
+  remote write.
 - Background/async triggering for auto-schedule/rebuild/fill-gaps (the `JobType` vocabulary already exists —
   `docs/scheduler.md` §7).
 - Bundled FFmpeg/FFprobe binaries in packaged builds (the sidecar resolution order already exists —
   `infrastructure::media::resolver` — nothing is bundled yet).
-- Comments/Analytics/Automation screens, currently explicit placeholders (out of scope through Phase 4).
+- Comments/Analytics/Automation screens, currently explicit placeholders (out of scope through Phase 5).
 - A full custom-schedule-for-one-date exception system (only "skip this date" is implemented — `docs/scheduler.md` §1).
-- `domain::readiness::compute_readiness` is built and unit tested but not wired to a command yet — Queue/Dashboard
-  currently mirror an equivalent check client-side against already-fetched data instead.

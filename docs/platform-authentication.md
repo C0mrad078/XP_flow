@@ -16,9 +16,9 @@ The result is a **two-port split**, not one uniform OAuth client:
 - **`PlatformAuthProvider`** — provider-specific. One `authenticate(session, cancel_rx) -> Result<ConnectedIdentity, AuthError>`
   call per provider; the internals are allowed to differ completely (see §3).
 - **`PlatformConnector`** — uniform once connected. `validate_connection`, `refresh_connection`, `disconnect`,
-  `get_profile`, `store_local_credential` — same shape for all three providers once a `PlatformAccount` exists.
-  `publish_video`/`get_publication_status`/`fetch_metrics`/`fetch_comments` are defined on the trait but return
-  `NotImplemented` — the Phase 5 seam.
+  `get_profile`, `store_local_credential`, `acquire_access_token` — same shape for all three providers once a
+  `PlatformAccount` exists. Account lifecycle only — actual publishing goes through the separate
+  `PlatformPublisher` port Phase 5 added (`docs/publishing-engine.md`), not through this trait.
 
 ## 2. Domain model
 
@@ -152,13 +152,17 @@ channels the workspace has.
   in this codebase or its tests should be read as a claim of live end-to-end verification against real Google/TikTok/
   Kwai endpoints.
 - The refresh-race guard is check-then-set, not a true CAS — see §6.
-- `domain::readiness::compute_readiness` (account/video readiness issues for a publication) is built and unit
-  tested but not wired to a Tauri command; the Queue/Dashboard readiness signals described in §7 are a client-side
-  equivalent computed directly from already-fetched `PlatformAccount[]` data, to avoid adding a new N+1 pattern
-  the moment after fixing one.
+- `domain::readiness::compute_readiness` (account/video readiness issues for a publication) was, at the time this
+  was written, unit tested but not wired to a Tauri command; Phase 5 has since wired it via
+  `PublishingReadinessService` and the `get_publication_readiness` command (`docs/publishing-engine.md`). The
+  Queue/Dashboard readiness signals described in §7 predate that and are still a client-side equivalent computed
+  directly from already-fetched `PlatformAccount[]` data — not yet switched over to the real command.
 
-## Deferred to Phase 5
+## What Phase 5 built on top of this
 
-Real video publishing/uploads, comments fetch/reply, full social analytics ingestion. The `PlatformConnector`
-trait's publishing methods exist as a typed seam (`NotImplemented`) specifically so Phase 5 doesn't need to touch
-`domain` or `commands` to fill them in.
+Real video publishing/uploads for YouTube, TikTok and Kwai, crash recovery, retry, and TikTok's express-consent
+gate — see `docs/publishing-engine.md`. Comments fetch/reply and full social analytics ingestion remain out of
+scope. `CredentialAcquisitionService` (introduced in Phase 5) is now the single point all publishing code acquires
+an access token through, calling into the exact `PlatformConnector`/`acquire_access_token` and
+`PlatformAuthService::refresh` machinery this document describes — nothing about token storage or refresh changed
+underneath it.

@@ -6,8 +6,10 @@ what happened along the way.
 
 This repository currently implements **Phase 1 (Foundation, Architecture, Desktop Shell and Design System)**,
 **Phase 2 (Media Library, Cut.pro Folder Watcher, FFmpeg Integration and Local Content Management)**,
-**Phase 3 (Persistent Queue Engine, Scheduler, Calendar, Priority System and Operational Workflow)**, and
-**Phase 4 (Real Platform Authentication, Account Management, OAuth Lifecycle and Connector Foundation)**. It is a
+**Phase 3 (Persistent Queue Engine, Scheduler, Calendar, Priority System and Operational Workflow)**,
+**Phase 4 (Real Platform Authentication, Account Management, OAuth Lifecycle and Connector Foundation)**, and the
+backend of **Phase 5 (Real Publishing Engine, Resumable Uploads, Crash Recovery, Idempotency and Provider
+Execution)** — real uploads to YouTube, TikTok and Kwai, with no frontend built on top of it yet. It is a
 production-grade base for the full product, not a throwaway prototype — see [Current implementation status](#current-implementation-status)
 for exactly what is real versus what is intentionally deferred.
 
@@ -61,7 +63,8 @@ xp-flow/
 │   │   ├── application/        # Use-case services: workspace, settings, activity, channel, source, content,
 │   │   │                       # media_ingestion_service (the one ingestion pipeline every import path uses),
 │   │   │                       # publication_service, scheduler_service, schedule_slot_service,
-│   │   │                       # platform_account_service (Phase 3's queue/scheduler)
+│   │   │                       # platform_account_service (Phase 3's queue/scheduler), publishing_engine_service +
+│   │   │                       # publishing_readiness_service + credential_acquisition_service (Phase 5)
 │   │   ├── services/           # Cross-cutting technical services: media status, notifications, job_runner
 │   │   │                       # (bounded-concurrency import + folder-watcher dispatch + reconciliation)
 │   │   ├── infrastructure/     # SQLx repositories, platform connector stubs, media (FFprobe/FFmpeg), hashing
@@ -74,12 +77,16 @@ xp-flow/
 │   │   └── lib.rs, main.rs, state.rs, error.rs, test_support.rs
 │   └── migrations/             # SQL migrations (SQLx)
 │
-└── docs/                       # architecture.md, media-library.md, scheduler.md, development-guidelines.md
+└── docs/                       # architecture.md, media-library.md, scheduler.md, development-guidelines.md,
+                                # platform-authentication.md, auth-broker.md, provider-capabilities.md,
+                                # publishing-engine.md, youtube-publishing.md, tiktok-publishing.md,
+                                # kwai-publishing.md, crash-recovery.md
 ```
 
 See `docs/architecture.md` for the full explanation of why the backend is layered this way,
-`docs/media-library.md` for the ingestion pipeline, folder watching and duplicate detection specifically, and
-`docs/scheduler.md` for the queue engine, scheduler, timezone handling and calendar specifically.
+`docs/media-library.md` for the ingestion pipeline, folder watching and duplicate detection specifically,
+`docs/scheduler.md` for the queue engine, scheduler, timezone handling and calendar specifically, and
+`docs/publishing-engine.md` for the exactly-once publishing engine, resumable uploads and crash recovery.
 
 ## Development requirements
 
@@ -212,6 +219,27 @@ never real video publishing (that's Phase 5). See `docs/platform-authentication.
 - Settings → Integrations (provider cards, connect/manage/disconnect) and the Channels screen both use the same
   connect flow and the same `ChannelOverview` aggregate query introduced to fix a documented N+1 IPC pattern.
 
+## Publishing engine
+
+Phase 5 turns Phase 3's scheduler and Phase 4's connected accounts into a real publishing system. See
+`docs/publishing-engine.md` for the full write-up, plus `docs/youtube-publishing.md`, `docs/tiktok-publishing.md`,
+`docs/kwai-publishing.md` and `docs/crash-recovery.md` per provider; the essentials:
+
+- **At most one remote post per publication, always.** Claiming a due publication is a single guarded database
+  write (`WHERE status='scheduled' AND locked=0`, proven race-safe under real concurrency), and every subsequent
+  write to its execution state is guarded on the claim token that operation actually holds — an unrelated action
+  (editing a title, rescheduling) can never revert an active claim.
+- **Real uploaders for YouTube, TikTok and Kwai** — resumable/chunked/stepwise transfer per each provider's actual
+  protocol, talking directly to the provider (never proxied through any XP FLOW server) except for the token itself
+  on TikTok/Kwai, which the Auth Broker issues.
+- **Crash recovery that verifies before ever resuming** — a claim abandoned by a killed process is never blindly
+  restarted; real remote state is checked first, per provider, before anything is re-sent.
+- **TikTok's express-consent requirement** is a hard gate, keyed to the exact rendered metadata by content hash —
+  an edit after approval means the old approval no longer covers it.
+- Commands to drive all of this: `publish_now`, `retry_publication`, `get_publication_attempts`,
+  `get_publication_readiness`, `record_publication_consent`.
+- **No frontend built on this yet** — see Current implementation status below.
+
 ## Current implementation status
 
 **Implemented and real:**
@@ -245,6 +273,11 @@ never real video publishing (that's Phase 5). See `docs/platform-authentication.
   Settings → Integrations screen and real per-platform connection state on the Channels/Queue/Dashboard screens.
   OS-native secure storage (Keychain / Credential Manager) now holds real YouTube credentials; TikTok/Kwai tokens
   never leave the Auth Broker's own encrypted SQLite.
+- **Real publishing engine, backend only** (Phase 5): exactly-once claim/execution against real YouTube, TikTok and
+  Kwai uploaders (resumable/chunked/stepwise per provider), crash recovery that verifies real remote state before
+  ever resuming or restarting, jittered exponential retry backoff, TikTok's express-consent gate keyed to a
+  metadata content hash, and the `publish_now`/`retry_publication`/`get_publication_attempts`/
+  `get_publication_readiness`/`record_publication_consent` commands exposing it — see `docs/publishing-engine.md`.
 - Structured logging to a local JSON log file
 - A complete, customized UI component library (not default shadcn) and design token system, including a themed
   confirmation dialog (`confirmAction()`) replacing every native `window.confirm()`
@@ -253,18 +286,28 @@ never real video publishing (that's Phase 5). See `docs/platform-authentication.
   placeholders for Comments/Analytics/Automation
 - Command palette, notification center, collapsible sidebar, dark theme (polished) / light theme (structural)
 
-**Deliberately not implemented yet** (see `docs/architecture.md`, `docs/scheduler.md` and
-`docs/platform-authentication.md` for what each needs before it can land):
+**Deliberately not implemented yet** (see `docs/architecture.md`, `docs/scheduler.md`,
+`docs/platform-authentication.md` and `docs/publishing-engine.md` for what each needs before it can land):
 
-- Real video publishing/uploads, comments fetch/reply, or full social analytics ingestion — a publication can be
-  scheduled all the way to "this UTC instant is booked" and its channel can carry a real, connected account with
-  read-level capabilities, and a due-publication query already exists for a future uploader to consume, but nothing
-  calls a platform's publish API yet. `PlatformConnector`'s publishing methods exist as a typed `NotImplemented`
-  seam specifically so this doesn't require touching `domain`/`commands` to fill in.
-- No live YouTube/TikTok/Kwai developer credentials were available while building Phase 4 — every OAuth code path
-  was verified against fakes/mocks (desktop) or `wiremock` (broker), never a live provider. "Implementation
-  complete" is not the same claim as "provider-approved for production publishing" — see
-  `docs/provider-capabilities.md`.
+- **No frontend for real publishing.** Phase 5's engine, uploaders and commands are real and tested, but no UI
+  consumes them yet — no live upload progress, no Publication Details attempt history, no metadata editor, no
+  Settings → Publishing screen, no TikTok consent-confirmation dialog. The Queue/Today/Dashboard/Activity screens
+  still reflect Phase 3/4 state only.
+- **No metadata template system.** `MetadataTemplate`/`HashtagSet` domain types and their repositories exist;
+  the precedence-resolution service (`MetadataTemplateService`) and CRUD commands don't. Publishing renders
+  metadata directly from a Publication's own fields today.
+- **No rate-limit-aware backoff.** `provider_rate_state` has a repository but nothing writes to it yet; a
+  provider's own rate-limit response is only ever handled as that one attempt's `RateLimited` error.
+- **No deliberate "repost" action** — the `execution_key` mechanism that would let one exist is in place, but
+  nothing in the app currently mints a fresh one.
+- Comments fetch/reply and full social analytics ingestion remain entirely out of scope, as before.
+- No live YouTube/TikTok/Kwai developer credentials were available while building Phase 4 or Phase 5 — every OAuth
+  and publishing code path was verified against fakes/mocks (desktop) or `wiremock` (broker/uploaders), never a
+  live provider. "Implementation complete" is not the same claim as "provider-approved for production publishing"
+  — see `docs/provider-capabilities.md`. Kwai's uploader specifically is grounded in an unofficial third-party API
+  client rather than Kwai's own documentation, which was not reachable while building it — see
+  `docs/kwai-publishing.md` for exactly which parts of that implementation are verified fact versus a stated
+  assumption.
 - Video transcoding (FFmpeg detection and thumbnail extraction exist; re-encoding does not)
 - Bundled FFmpeg/FFprobe binaries in packaged builds (the sidecar-resolution logic exists; nothing is bundled)
 - Background/async triggering of auto-schedule/rebuild/fill-gaps (the job-type vocabulary exists; nothing enqueues it
