@@ -43,7 +43,9 @@ use domain::ports::repositories::{
     UploadSessionRepository, VideoRepository, VideoSourceRepository, WorkspaceRepository,
 };
 use infrastructure::auth::{AuthBrokerConfig, BrokerClient};
-use infrastructure::connectors::kwai::{KwaiAuthProvider, KwaiConnector};
+use infrastructure::connectors::kwai::{
+    KwaiAuthProvider, KwaiConnector, KwaiPublishConfig, KwaiUploader,
+};
 use infrastructure::connectors::tiktok::{
     TikTokAuthConfig, TikTokAuthProvider, TikTokConnector, TikTokUploader,
 };
@@ -317,6 +319,7 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
 
     let youtube_config = YouTubeAuthConfig::resolve();
     let tiktok_config = TikTokAuthConfig::resolve();
+    let kwai_publish_config = KwaiPublishConfig::resolve();
     // `youtube_config` is consumed (by value) in the match below;
     // captured here so the publisher-wiring section further down still
     // knows whether a real `YouTubeUploader` can be registered.
@@ -444,10 +447,14 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         std::collections::HashMap::new();
     publishers.insert(
         Platform::Kwai,
-        Arc::new(StubPublisher::new(
-            Platform::Kwai,
-            "real publishing for this platform is not implemented in this build",
-        )),
+        if let (Some(config), true) = (kwai_publish_config, broker_client.is_some()) {
+            Arc::new(KwaiUploader::new(config)) as Arc<dyn PlatformPublisher>
+        } else {
+            Arc::new(StubPublisher::new(
+                Platform::Kwai,
+                "KWAI_APP_ID is not configured or the Auth Broker is unavailable",
+            )) as Arc<dyn PlatformPublisher>
+        },
     );
     publishers.insert(
         Platform::YouTube,
