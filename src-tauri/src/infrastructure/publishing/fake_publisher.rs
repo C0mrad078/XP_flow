@@ -117,12 +117,12 @@ impl PlatformPublisher for FakePublisher {
         video: &Video,
         progress: ProgressSender,
         cancel: CancelSignal,
-    ) -> Result<UploadSession, PublishError> {
+    ) -> (UploadSession, Result<(), PublishError>) {
         let scenario = self.state.lock().unwrap().scenario.clone();
         let total = video.file_size_bytes;
 
         if cancel.is_cancelled() {
-            return Err(PublishError::Cancelled);
+            return (session, Err(PublishError::Cancelled));
         }
 
         match scenario {
@@ -134,7 +134,7 @@ impl PlatformPublisher for FakePublisher {
                     bytes_uploaded: half,
                     bytes_total: Some(total),
                 });
-                Err(PublishError::NetworkTransient)
+                (session, Err(PublishError::NetworkTransient))
             }
             _ => {
                 session.bytes_committed = total;
@@ -143,7 +143,7 @@ impl PlatformPublisher for FakePublisher {
                     bytes_uploaded: total,
                     bytes_total: Some(total),
                 });
-                Ok(session)
+                (session, Ok(()))
             }
         }
     }
@@ -214,8 +214,10 @@ impl PlatformPublisher for FakePublisher {
             session.bytes_total.unwrap_or(0),
             "mp4",
         );
-        self.upload_media(access_token, session, &video, _sender, CancelSignal::new())
-            .await
+        let (session, result) = self
+            .upload_media(access_token, session, &video, _sender, CancelSignal::new())
+            .await;
+        result.map(|()| session)
     }
 
     async fn cancel_upload_if_supported(

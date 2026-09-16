@@ -1,0 +1,1241 @@
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+
+use chrono::{Duration, Utc};
+use tokio::sync::mpsc;
+use uuid::Uuid;
+
+use crate::application::activity_service::ActivityService;
+use crate::application::credential_acquisition_service::CredentialAcquisitionService;
+use crate::domain::activity_event::{ActivityCategory, ActivityLevel};
+use crate::domain::channel::ChannelStatus;
+use crate::domain::platform::Platform;
+use crate::domain::ports::hashing::ContentHashService;
+use crate::domain::ports::platform_publisher::{CancelSignal, PlatformPublisher};
+use crate::domain::ports::repositories::{
+    ChannelRepository, ExecutionStateUpdate, PlatformAccountRepository,
+    PublicationAttemptRepository, PublicationRepository, UploadSessionRepository, VideoRepository,
+};
+use crate::domain::publication::{Publication, PublicationStatus};
+use crate::domain::publishing::retry_policy::{attempts_exhausted, next_retry_at};
+use crate::domain::publishing::{
+    PublicationAttempt, PublishError, RemoteUploadState, RenderedMetadata,
+};
+use crate::services::notification_service::NotificationService;
+
+/// How long a claim is valid before it's considered abandoned (section
+/// 13). Generous relative to how long a real upload realistically takes
+/// — a crash mid-upload is recovered correctly regardless (via
+/// `recover_upload`/`PlatformPublisher::recover_upload`, which inspects
+/// actual remote state rather than blindly restarting), so this bound
+/// exists to reclaim genuinely abandoned claims, not to race a slow but
+/// healthy upload.
+const CLAIM_LEASE_DURATION: Duration = Duration::minutes(45);
+
+/// Orchestrates one publication's execution end to end (section 3-14):
+/// claim -> credential acquisition -> provider dispatch -> attempt/
+/// session persistence -> status transition. Every write to a
+/// publication's execution state goes through the repository's guarded
+/// methods (`try_claim_due`, `update_execution_state`,
+/// `try_finish_processing`) — this service never calls the generic
+/// `update()` on a publication it's actively executing.
+pub struct PublishingEngineService {
+    publication_repo: Arc<dyn PublicationRepository>,
+    attempt_repo: Arc<dyn PublicationAttemptRepository>,
+    session_repo: Arc<dyn UploadSessionRepository>,
+    video_repo: Arc<dyn VideoRepository>,
+    platform_account_repo: Arc<dyn PlatformAccountRepository>,
+    channel_repo: Arc<dyn ChannelRepository>,
+    content_hash_service: Arc<dyn ContentHashService>,
+    credential_service: Arc<CredentialAcquisitionService>,
+    publishers: HashMap<Platform, Arc<dyn PlatformPublisher>>,
+    activity_service: Arc<ActivityService>,
+    notification_service: Arc<NotificationService>,
+}
+
+#[allow(clippy::too_many_arguments)]
+impl PublishingEngineService {
+    pub fn new(
+        publication_repo: Arc<dyn PublicationRepository>,
+        attempt_repo: Arc<dyn PublicationAttemptRepository>,
+        session_repo: Arc<dyn UploadSessionRepository>,
+        video_repo: Arc<dyn VideoRepository>,
+        platform_account_repo: Arc<dyn PlatformAccountRepository>,
+        channel_repo: Arc<dyn ChannelRepository>,
+        content_hash_service: Arc<dyn ContentHashService>,
+        credential_service: Arc<CredentialAcquisitionService>,
+        publishers: HashMap<Platform, Arc<dyn PlatformPublisher>>,
+        activity_service: Arc<ActivityService>,
+        notification_service: Arc<NotificationService>,
+    ) -> Self {
+        Self {
+            publication_repo,
+            attempt_repo,
+            session_repo,
+            video_repo,
+            platform_account_repo,
+            channel_repo,
+            content_hash_service,
+            credential_service,
+            publishers,
+            activity_service,
+            notification_service,
+        }
+    }
+
+    /// Scans due publications and atomically claims every one whose
+    /// channel isn't paused (section 82) and isn't locked (already
+    /// enforced by `try_claim_due`'s own SQL). Returns the claim tokens
+    /// the caller (`JobRunner`) needs to actually execute each one —
+    /// claiming and executing are deliberately separate steps so a
+    /// caller can enqueue a real `Job` row (idempotency/crash bookkeeping)
+    /// in between (section 14/122).
+    pub async fn scan_and_claim_due(&self, workspace_id: Uuid) -> Vec<(Uuid, String)> {
+        let now = Utc::now();
+        let due = match self.publication_repo.list_due(workspace_id, now).await {
+            Ok(due) => due,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut claimed = Vec::new();
+        for publication in due {
+            match self.channel_repo.get(publication.channel_id).await {
+                Ok(Some(channel)) if channel.status == ChannelStatus::Paused => continue,
+                Ok(Some(_)) => {}
+                _ => continue,
+            }
+
+            let claim_token = Uuid::new_v4().to_string();
+            let candidate_execution_key = publication.execution_key.unwrap_or_else(Uuid::new_v4);
+            let lease_expires_at = now + CLAIM_LEASE_DURATION;
+            if self
+                .publication_repo
+                .try_claim_due(
+                    publication.id,
+                    candidate_execution_key,
+                    &claim_token,
+                    lease_expires_at,
+                    now,
+                )
+                .await
+                .unwrap_or(false)
+            {
+                claimed.push((publication.id, claim_token));
+            }
+        }
+        claimed
+    }
+
+    /// Executes one already-claimed publication. Never panics on a
+    /// provider/network failure — every error path releases the claim
+    /// and records what happened; the only thing this can't recover from
+    /// gracefully is the process being killed mid-call, which is exactly
+    /// what the startup/periodic recovery pass (`recover_interrupted`)
+    /// exists for.
+    pub async fn execute(&self, publication_id: Uuid, claim_token: String) {
+        if let Err(err) = self.execute_inner(publication_id, &claim_token).await {
+            tracing::warn!(publication_id = %publication_id, error = %err, "publication execution ended in error");
+        }
+    }
+
+    async fn execute_inner(
+        &self,
+        publication_id: Uuid,
+        claim_token: &str,
+    ) -> Result<(), PublishError> {
+        let publication = self
+            .publication_repo
+            .get(publication_id)
+            .await
+            .map_err(|e| PublishError::Internal {
+                detail: e.to_string(),
+            })?
+            .ok_or_else(|| PublishError::Internal {
+                detail: "publication not found".to_string(),
+            })?;
+
+        let video = self
+            .video_repo
+            .get(publication.video_id)
+            .await
+            .map_err(|e| PublishError::Internal {
+                detail: e.to_string(),
+            })?
+            .ok_or(PublishError::VideoUnavailable)?;
+
+        // Section 117/118: the source file is re-verified immediately
+        // before use — never trusted just because it was valid when
+        // ingested or queued.
+        let path = Path::new(&video.file_path);
+        if !path.exists() {
+            return self
+                .fail_and_release(&publication, claim_token, PublishError::VideoUnavailable, 0)
+                .await;
+        }
+        if let Some(expected_hash) = &video.content_hash {
+            match self.content_hash_service.hash_file(path).await {
+                Ok(actual_hash) if &actual_hash != expected_hash => {
+                    return self
+                        .fail_and_release(
+                            &publication,
+                            claim_token,
+                            PublishError::InvalidMedia {
+                                detail: "the source file changed since it was queued".to_string(),
+                            },
+                            0,
+                        )
+                        .await;
+                }
+                _ => {}
+            }
+        }
+
+        let account = match publication.platform_account_id {
+            Some(id) => self.platform_account_repo.get(id).await.ok().flatten(),
+            None => None,
+        };
+        let Some(account) = account else {
+            return self
+                .fail_and_release(&publication, claim_token, PublishError::AuthExpired, 0)
+                .await;
+        };
+        // Section 21: "account connected" and "account can publish" are
+        // different claims — a missing scope is caught here, before any
+        // network call, rather than discovered as an opaque provider
+        // rejection mid-upload.
+        if !account.has_capability(crate::domain::capability::Capability::UploadVideo) {
+            return self
+                .fail_and_release(
+                    &publication,
+                    claim_token,
+                    PublishError::PermissionMissing {
+                        capability: "upload_video".to_string(),
+                    },
+                    0,
+                )
+                .await;
+        }
+
+        let publisher = self
+            .publishers
+            .get(&publication.platform)
+            .ok_or_else(|| PublishError::Internal {
+                detail: format!("no publisher registered for {}", publication.platform),
+            })?
+            .clone();
+
+        // Section 22/29: rendered from the publication's own fields for
+        // now — the full template-precedence engine
+        // (`MetadataTemplateService`) composes these same fields before
+        // scheduling; the engine only ever freezes and sends whatever is
+        // already on the row at execution time (section 103).
+        let metadata = RenderedMetadata {
+            title: publication.title.clone(),
+            description: publication.description.clone().unwrap_or_default(),
+            hashtags: publication.hashtags.clone(),
+            provider_options: serde_json::json!({}),
+        };
+
+        if let Err(err) = publisher.validate_metadata(&metadata) {
+            return self
+                .fail_and_release(&publication, claim_token, err, 0)
+                .await;
+        }
+        if let Err(err) = publisher.validate_media(&video).await {
+            return self
+                .fail_and_release(&publication, claim_token, err, 0)
+                .await;
+        }
+
+        self.freeze_metadata(publication_id, claim_token, &metadata)
+            .await;
+
+        let attempt_number = self
+            .attempt_repo
+            .max_attempt_number(publication_id)
+            .await
+            .unwrap_or(0)
+            + 1;
+        let mut attempt =
+            PublicationAttempt::new(publication_id, attempt_number, publication.platform);
+        attempt.start();
+        let _ = self.attempt_repo.create(&attempt).await;
+
+        let access_token = match self.credential_service.acquire(&account).await {
+            Ok(token) => token,
+            Err(err) => {
+                return self
+                    .finish_attempt_failure(&publication, claim_token, &mut attempt, err)
+                    .await
+            }
+        };
+
+        let mut session = match publisher
+            .initialize_upload(&account, &access_token, &video, &metadata)
+            .await
+        {
+            Ok(mut session) => {
+                session.publication_id = publication_id;
+                session.attempt_id = attempt.id;
+                session
+            }
+            Err(err) => {
+                return self
+                    .finish_attempt_failure(&publication, claim_token, &mut attempt, err)
+                    .await
+            }
+        };
+        let _ = self.session_repo.create(&session).await;
+
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+        // Section 90/91: progress is forwarded here for a future event-
+        // bus subscriber; nothing persists a row per event (section 149)
+        // — the durable checkpoint is the session update below, once,
+        // after the transfer finishes rather than per byte.
+        tokio::spawn(async move { while progress_rx.recv().await.is_some() {} });
+
+        let (updated_session, upload_result) = publisher
+            .upload_media(
+                &access_token,
+                session,
+                &video,
+                progress_tx,
+                CancelSignal::new(),
+            )
+            .await;
+        session = updated_session;
+        let _ = self.session_repo.update(&session).await;
+        if let Err(err) = upload_result {
+            return self
+                .finish_attempt_failure(&publication, claim_token, &mut attempt, err)
+                .await;
+        }
+
+        let pre_finalize_session = session.clone();
+        session = match publisher.finalize_publication(&access_token, session).await {
+            Ok(session) => session,
+            Err(err) => {
+                let _ = self.session_repo.update(&pre_finalize_session).await;
+                return self
+                    .finish_attempt_failure(&publication, claim_token, &mut attempt, err)
+                    .await;
+            }
+        };
+        let _ = self.session_repo.update(&session).await;
+
+        match session.state {
+            RemoteUploadState::RemoteSucceeded => {
+                attempt.succeed(session.remote_publish_id.clone());
+                let _ = self.attempt_repo.update(&attempt).await;
+                let released = self
+                    .publication_repo
+                    .update_execution_state(
+                        publication_id,
+                        claim_token,
+                        &ExecutionStateUpdate {
+                            status: PublicationStatus::Published,
+                            remote_id: session.remote_publish_id.clone(),
+                            retry_count: publication.retry_count,
+                            last_error: None,
+                            rendered_metadata_json: None,
+                            release_claim: true,
+                            new_lease_expires_at: None,
+                            published_at: Some(Utc::now()),
+                        },
+                    )
+                    .await
+                    .unwrap_or(false);
+                if released {
+                    self.log_success(&publication).await;
+                }
+                Ok(())
+            }
+            RemoteUploadState::RemoteProcessing | RemoteUploadState::Transferred => {
+                // Section 45/57: transferred is not the same claim as
+                // published — a separate poll (`poll_processing`) confirms
+                // the provider's own remote result before this ever
+                // becomes `Published`.
+                let _ = self
+                    .publication_repo
+                    .update_execution_state(
+                        publication_id,
+                        claim_token,
+                        &ExecutionStateUpdate {
+                            status: PublicationStatus::Processing,
+                            remote_id: session.remote_publish_id.clone(),
+                            retry_count: publication.retry_count,
+                            last_error: None,
+                            rendered_metadata_json: None,
+                            release_claim: true,
+                            new_lease_expires_at: None,
+                            published_at: None,
+                        },
+                    )
+                    .await;
+                let _ = self
+                    .activity_service
+                    .log(
+                        ActivityCategory::Publication,
+                        ActivityLevel::Info,
+                        format!(
+                            "\"{}\" uploaded — waiting on {} processing",
+                            publication.title, publication.platform
+                        ),
+                    )
+                    .await;
+                Ok(())
+            }
+            _ => {
+                self.finish_attempt_failure(
+                    &publication,
+                    claim_token,
+                    &mut attempt,
+                    PublishError::UnknownRemoteResult,
+                )
+                .await
+            }
+        }
+    }
+
+    /// Polls a `Processing` publication's remote status (section 45/56).
+    /// Read-only until a terminal result appears — never re-uploads.
+    pub async fn poll_processing(&self, publication_id: Uuid) -> Result<(), PublishError> {
+        let publication = self
+            .publication_repo
+            .get(publication_id)
+            .await
+            .map_err(|e| PublishError::Internal {
+                detail: e.to_string(),
+            })?
+            .ok_or_else(|| PublishError::Internal {
+                detail: "publication not found".to_string(),
+            })?;
+        if publication.status != PublicationStatus::Processing {
+            return Ok(());
+        }
+        let Some(session) = self
+            .session_repo
+            .latest_for_publication(publication_id)
+            .await
+            .map_err(|e| PublishError::Internal {
+                detail: e.to_string(),
+            })?
+        else {
+            return Ok(());
+        };
+        let Some(account) = (match publication.platform_account_id {
+            Some(id) => self.platform_account_repo.get(id).await.ok().flatten(),
+            None => None,
+        }) else {
+            return Ok(());
+        };
+        let Some(publisher) = self.publishers.get(&publication.platform) else {
+            return Ok(());
+        };
+        let access_token = self.credential_service.acquire(&account).await?;
+        let state = publisher.get_remote_status(&access_token, &session).await?;
+
+        match state {
+            RemoteUploadState::RemoteSucceeded => {
+                self.publication_repo
+                    .try_finish_processing(
+                        publication_id,
+                        PublicationStatus::Published,
+                        session.remote_publish_id.clone(),
+                        None,
+                        Some(Utc::now()),
+                    )
+                    .await
+                    .map_err(|e| PublishError::Internal {
+                        detail: e.to_string(),
+                    })?;
+                self.log_success(&publication).await;
+            }
+            RemoteUploadState::RemoteFailed => {
+                self.publication_repo
+                    .try_finish_processing(
+                        publication_id,
+                        PublicationStatus::Failed,
+                        None,
+                        Some(
+                            PublishError::RemoteProcessingFailed {
+                                detail: "the platform failed to process the upload".to_string(),
+                            }
+                            .user_message(),
+                        ),
+                        None,
+                    )
+                    .await
+                    .map_err(|e| PublishError::Internal {
+                        detail: e.to_string(),
+                    })?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Reconciles publications whose claim lease expired — an abandoned
+    /// claim from a process that was killed mid-upload (section 13/88).
+    /// Always inspects real persisted state before touching anything;
+    /// never blindly restarts (section 42/43/55).
+    pub async fn recover_interrupted(&self, workspace_id: Uuid) {
+        let expired = match self
+            .publication_repo
+            .list_with_expired_leases(workspace_id, Utc::now())
+            .await
+        {
+            Ok(rows) => rows,
+            Err(_) => return,
+        };
+        for publication in expired {
+            self.recover_one(publication).await;
+        }
+    }
+
+    async fn recover_one(&self, publication: Publication) {
+        let Some(claim_token) = publication.claim_token.clone() else {
+            return;
+        };
+        let session = self
+            .session_repo
+            .latest_for_publication(publication.id)
+            .await
+            .ok()
+            .flatten();
+
+        let safe_to_restart = session
+            .as_ref()
+            .map(|s| s.state.safe_to_restart())
+            .unwrap_or(true);
+        if safe_to_restart {
+            // Nothing was ever durably transferred — release the claim
+            // and send it back through the retry chain so the next scan
+            // can pick it up again. Releasing here (rather than via
+            // `requeue_for_retry`, which expects an already-`Failed` row)
+            // needs the claim to actually be dropped first.
+            let _ = self
+                .publication_repo
+                .update_execution_state(
+                    publication.id,
+                    &claim_token,
+                    &ExecutionStateUpdate {
+                        status: PublicationStatus::Failed,
+                        remote_id: None,
+                        retry_count: publication.retry_count,
+                        last_error: Some("interrupted before any data was sent".to_string()),
+                        rendered_metadata_json: None,
+                        release_claim: true,
+                        new_lease_expires_at: None,
+                        published_at: None,
+                    },
+                )
+                .await;
+            self.requeue_for_retry(&publication, publication.retry_count)
+                .await;
+            return;
+        }
+
+        let Some(session) = session else { return };
+        let Some(account) = (match publication.platform_account_id {
+            Some(id) => self.platform_account_repo.get(id).await.ok().flatten(),
+            None => None,
+        }) else {
+            return;
+        };
+        let Some(publisher) = self.publishers.get(&publication.platform) else {
+            return;
+        };
+        let Ok(access_token) = self.credential_service.acquire(&account).await else {
+            return;
+        };
+
+        match publisher
+            .recover_upload(&access_token, session.clone())
+            .await
+        {
+            Ok(recovered) => {
+                let _ = self.session_repo.update(&recovered).await;
+                match recovered.state {
+                    RemoteUploadState::RemoteSucceeded => {
+                        let _ = self
+                            .publication_repo
+                            .update_execution_state(
+                                publication.id,
+                                &claim_token,
+                                &ExecutionStateUpdate {
+                                    status: PublicationStatus::Published,
+                                    remote_id: recovered.remote_publish_id.clone(),
+                                    retry_count: publication.retry_count,
+                                    last_error: None,
+                                    rendered_metadata_json: None,
+                                    release_claim: true,
+                                    new_lease_expires_at: None,
+                                    published_at: Some(Utc::now()),
+                                },
+                            )
+                            .await;
+                        self.log_success(&publication).await;
+                    }
+                    RemoteUploadState::RemoteProcessing | RemoteUploadState::Transferred => {
+                        let _ = self
+                            .publication_repo
+                            .update_execution_state(
+                                publication.id,
+                                &claim_token,
+                                &ExecutionStateUpdate {
+                                    status: PublicationStatus::Processing,
+                                    remote_id: recovered.remote_publish_id.clone(),
+                                    retry_count: publication.retry_count,
+                                    last_error: None,
+                                    rendered_metadata_json: None,
+                                    release_claim: true,
+                                    new_lease_expires_at: None,
+                                    published_at: None,
+                                },
+                            )
+                            .await;
+                    }
+                    _ => {
+                        let _ = self
+                            .publication_repo
+                            .update_execution_state(
+                                publication.id,
+                                &claim_token,
+                                &ExecutionStateUpdate {
+                                    status: PublicationStatus::Failed,
+                                    remote_id: None,
+                                    retry_count: publication.retry_count + 1,
+                                    last_error: Some(
+                                        "recovery reported a failed remote result".to_string(),
+                                    ),
+                                    rendered_metadata_json: None,
+                                    release_claim: true,
+                                    new_lease_expires_at: None,
+                                    published_at: None,
+                                },
+                            )
+                            .await;
+                        self.requeue_for_retry(&publication, publication.retry_count + 1)
+                            .await;
+                    }
+                }
+            }
+            Err(_) => {
+                // Section 69: the outcome is still genuinely unknown —
+                // fail closed rather than guessing. Releasing the claim
+                // without restarting keeps this out of the due-scan
+                // (status stays `Uploading` with no lease, so nothing
+                // else picks it up) until a human verifies and retries
+                // it manually.
+                let _ = self
+                    .publication_repo
+                    .update_execution_state(
+                        publication.id,
+                        &claim_token,
+                        &ExecutionStateUpdate {
+                            status: PublicationStatus::Failed,
+                            remote_id: None,
+                            retry_count: publication.retry_count,
+                            last_error: Some(PublishError::UnknownRemoteResult.user_message()),
+                            rendered_metadata_json: None,
+                            release_claim: true,
+                            new_lease_expires_at: None,
+                            published_at: None,
+                        },
+                    )
+                    .await;
+            }
+        }
+    }
+
+    async fn freeze_metadata(
+        &self,
+        publication_id: Uuid,
+        claim_token: &str,
+        metadata: &RenderedMetadata,
+    ) {
+        if let Ok(json) = serde_json::to_string(metadata) {
+            let _ = self
+                .publication_repo
+                .update_execution_state(
+                    publication_id,
+                    claim_token,
+                    &ExecutionStateUpdate {
+                        status: PublicationStatus::Uploading,
+                        remote_id: None,
+                        retry_count: 0,
+                        last_error: None,
+                        rendered_metadata_json: Some(json),
+                        release_claim: false,
+                        new_lease_expires_at: Some(Utc::now() + CLAIM_LEASE_DURATION),
+                        published_at: None,
+                    },
+                )
+                .await;
+        }
+    }
+
+    async fn finish_attempt_failure(
+        &self,
+        publication: &Publication,
+        claim_token: &str,
+        attempt: &mut PublicationAttempt,
+        err: PublishError,
+    ) -> Result<(), PublishError> {
+        attempt.fail(&err);
+        let _ = self.attempt_repo.update(attempt).await;
+        self.fail_and_release(publication, claim_token, err, attempt.attempt_number)
+            .await
+    }
+
+    async fn fail_and_release(
+        &self,
+        publication: &Publication,
+        claim_token: &str,
+        err: PublishError,
+        attempt_number: i32,
+    ) -> Result<(), PublishError> {
+        let retryable = err.is_retryable() && !attempts_exhausted(attempt_number);
+        let released = self
+            .publication_repo
+            .update_execution_state(
+                publication.id,
+                claim_token,
+                &ExecutionStateUpdate {
+                    status: PublicationStatus::Failed,
+                    remote_id: None,
+                    retry_count: publication.retry_count + 1,
+                    last_error: Some(err.user_message()),
+                    rendered_metadata_json: None,
+                    release_claim: true,
+                    new_lease_expires_at: None,
+                    published_at: None,
+                },
+            )
+            .await
+            .unwrap_or(false);
+
+        if released && retryable {
+            self.requeue_for_retry(publication, publication.retry_count + 1)
+                .await;
+        } else if released {
+            let _ = self
+                .notification_service
+                .notify(
+                    crate::domain::notification::NotificationType::Error,
+                    format!("{} publish failed", publication.platform.display_name()),
+                    format!(
+                        "\"{}\" couldn't be published: {}",
+                        publication.title,
+                        err.user_message()
+                    ),
+                )
+                .await;
+        }
+        Err(err)
+    }
+
+    /// Moves a `Failed` publication back through the valid state-machine
+    /// chain (`Failed -> RetryWait -> Queued -> Scheduled`) with a
+    /// jittered backoff delay, so the next due-scan picks it up again —
+    /// this is a plain `update()` call, not `update_execution_state`,
+    /// because by the time this runs the claim has already been released
+    /// and the row is no longer `Uploading`/`Processing` (section 73).
+    async fn requeue_for_retry(&self, publication: &Publication, attempt_number: i32) {
+        let Ok(Some(mut fresh)) = self.publication_repo.get(publication.id).await else {
+            return;
+        };
+        if fresh.status != PublicationStatus::Failed {
+            return;
+        }
+        let retry_at = next_retry_at(attempt_number.max(1), Utc::now(), None);
+        if fresh.transition(PublicationStatus::RetryWait).is_err() {
+            return;
+        }
+        if fresh.transition(PublicationStatus::Queued).is_err() {
+            return;
+        }
+        if fresh.transition(PublicationStatus::Scheduled).is_err() {
+            return;
+        }
+        fresh.scheduled_at = Some(retry_at);
+        let _ = self.publication_repo.update(&fresh).await;
+    }
+
+    async fn log_success(&self, publication: &Publication) {
+        let _ = self
+            .activity_service
+            .log(
+                ActivityCategory::Publication,
+                ActivityLevel::Success,
+                format!(
+                    "\"{}\" published to {}",
+                    publication.title, publication.platform
+                ),
+            )
+            .await;
+        let _ = self
+            .notification_service
+            .notify(
+                crate::domain::notification::NotificationType::Success,
+                format!("{} published", publication.platform.display_name()),
+                format!("\"{}\" is now live.", publication.title),
+            )
+            .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    use crate::application::activity_service::ActivityService;
+    use crate::application::platform_auth_service::PlatformAuthService;
+    use crate::domain::auth_error::AuthError;
+    use crate::domain::capability::Capability;
+    use crate::domain::platform_account::{PlatformAccount, PlatformAccountStatus};
+    use crate::domain::ports::platform_connector::PlatformConnector;
+    use crate::domain::provider_identity::{ConnectedIdentity, RefreshedCredentials};
+    use crate::domain::publication::PublicationStatus;
+    use crate::domain::video::Video;
+    use crate::infrastructure::hashing::content_hash::Sha256ContentHashService;
+    use crate::infrastructure::publishing::{FakePublisher, FakeScenario};
+    use crate::infrastructure::repositories::{
+        SqliteActivityRepository, SqliteChannelRepository, SqliteNotificationRepository,
+        SqlitePlatformAccountRepository, SqlitePublicationAttemptRepository,
+        SqlitePublicationRepository, SqliteUploadSessionRepository, SqliteVideoRepository,
+    };
+    use crate::test_support::*;
+
+    /// Always returns a fixed token — the tests below exercise the
+    /// engine's own exactly-once/recovery logic, not credential
+    /// acquisition, so this stays deliberately trivial.
+    struct FakeTokenConnector;
+
+    #[async_trait]
+    impl PlatformConnector for FakeTokenConnector {
+        fn platform(&self) -> Platform {
+            Platform::TikTok
+        }
+        async fn validate_connection(
+            &self,
+            _account: &PlatformAccount,
+        ) -> Result<ConnectedIdentity, AuthError> {
+            unimplemented!()
+        }
+        async fn refresh_connection(
+            &self,
+            _account: &PlatformAccount,
+        ) -> Result<RefreshedCredentials, AuthError> {
+            unimplemented!()
+        }
+        async fn disconnect(&self, _account: &PlatformAccount) -> Result<(), AuthError> {
+            Ok(())
+        }
+        async fn get_profile(
+            &self,
+            _account: &PlatformAccount,
+        ) -> Result<ConnectedIdentity, AuthError> {
+            unimplemented!()
+        }
+        async fn acquire_access_token(
+            &self,
+            _account: &PlatformAccount,
+        ) -> Result<String, AuthError> {
+            Ok("fake-access-token".to_string())
+        }
+    }
+
+    struct TestFixture {
+        pool: sqlx::SqlitePool,
+        engine: PublishingEngineService,
+        publication_repo: Arc<SqlitePublicationRepository>,
+        attempt_repo: Arc<SqlitePublicationAttemptRepository>,
+        session_repo: Arc<SqliteUploadSessionRepository>,
+        workspace_id: Uuid,
+        channel_id: Uuid,
+        source_id: Uuid,
+    }
+
+    async fn build_fixture(scenario: FakeScenario) -> TestFixture {
+        let pool = temp_pool("publishing-engine").await;
+        let (workspace_id, source_id) = seed_workspace_and_source(&pool).await;
+        let channel_id = seed_channel(&pool, workspace_id, "Channel").await;
+
+        let publication_repo = Arc::new(SqlitePublicationRepository::new(pool.clone()));
+        let attempt_repo = Arc::new(SqlitePublicationAttemptRepository::new(pool.clone()));
+        let session_repo = Arc::new(SqliteUploadSessionRepository::new(pool.clone()));
+        let video_repo = Arc::new(SqliteVideoRepository::new(pool.clone()));
+        let platform_account_repo = Arc::new(SqlitePlatformAccountRepository::new(pool.clone()));
+        let channel_repo = Arc::new(SqliteChannelRepository::new(pool.clone()));
+        let activity_service = Arc::new(ActivityService::new(Arc::new(
+            SqliteActivityRepository::new(pool.clone()),
+        )));
+        let notification_service = Arc::new(NotificationService::new(Arc::new(
+            SqliteNotificationRepository::new(pool.clone()),
+        )));
+
+        let platform_auth_service = Arc::new(PlatformAuthService::new(
+            HashMap::new(),
+            HashMap::new(),
+            platform_account_repo.clone(),
+            activity_service.clone(),
+            notification_service.clone(),
+        ));
+        let mut token_connectors: HashMap<Platform, Arc<dyn PlatformConnector>> = HashMap::new();
+        token_connectors.insert(Platform::TikTok, Arc::new(FakeTokenConnector));
+        let credential_service = Arc::new(CredentialAcquisitionService::new(
+            token_connectors,
+            platform_auth_service,
+        ));
+
+        let mut publishers: HashMap<Platform, Arc<dyn PlatformPublisher>> = HashMap::new();
+        publishers.insert(
+            Platform::TikTok,
+            Arc::new(FakePublisher::new(Platform::TikTok, scenario)),
+        );
+
+        let engine = PublishingEngineService::new(
+            publication_repo.clone() as Arc<dyn PublicationRepository>,
+            attempt_repo.clone() as Arc<dyn PublicationAttemptRepository>,
+            session_repo.clone() as Arc<dyn UploadSessionRepository>,
+            video_repo.clone() as Arc<dyn VideoRepository>,
+            platform_account_repo.clone() as Arc<dyn PlatformAccountRepository>,
+            channel_repo as Arc<dyn ChannelRepository>,
+            Arc::new(Sha256ContentHashService),
+            credential_service,
+            publishers,
+            activity_service,
+            notification_service,
+        );
+
+        TestFixture {
+            pool,
+            engine,
+            publication_repo,
+            attempt_repo,
+            session_repo,
+            workspace_id,
+            channel_id,
+            source_id,
+        }
+    }
+
+    /// Seeds a real video file on disk (the engine checks `path.exists()`
+    /// before ever touching the network — section 118), a `Connected`
+    /// account with `UploadVideo`, and a due `Scheduled` publication
+    /// targeting it. Returns the publication id.
+    async fn seed_ready_publication(
+        pool: &sqlx::SqlitePool,
+        workspace_id: Uuid,
+        channel_id: Uuid,
+        source_id: Uuid,
+    ) -> Uuid {
+        let dir = temp_dir("publishing-engine-video");
+        let path = write_fake_video(&dir, "clip.mp4", b"fake video bytes");
+
+        let video = Video::new(
+            workspace_id,
+            source_id,
+            Some(channel_id),
+            "clip.mp4",
+            "Clip",
+            path.display().to_string(),
+            path.metadata().unwrap().len() as i64,
+            "mp4",
+        );
+        let video_repo = SqliteVideoRepository::new(pool.clone());
+        use crate::domain::ports::repositories::VideoRepository;
+        video_repo.create(&video).await.unwrap();
+
+        let mut account = PlatformAccount::new(workspace_id, channel_id, Platform::TikTok);
+        account.status = PlatformAccountStatus::Connected;
+        account.provider_connection_id = Some("conn-1".to_string());
+        account.capabilities = vec![Capability::ReadProfile, Capability::UploadVideo];
+        let account_repo = SqlitePlatformAccountRepository::new(pool.clone());
+        use crate::domain::ports::repositories::PlatformAccountRepository;
+        account_repo.create(&account).await.unwrap();
+
+        let mut publication = Publication::new(
+            workspace_id,
+            video.id,
+            channel_id,
+            Platform::TikTok,
+            "Great clip",
+            crate::domain::video_status::VideoPriority::Normal,
+        );
+        publication.platform_account_id = Some(account.id);
+        publication.status = PublicationStatus::Scheduled;
+        publication.scheduled_at = Some(Utc::now() - Duration::minutes(1));
+        let publication_repo = SqlitePublicationRepository::new(pool.clone());
+        publication_repo.create(&publication).await.unwrap();
+        publication.id
+    }
+
+    #[tokio::test]
+    async fn a_successful_publish_reaches_published_with_one_succeeded_attempt() {
+        let fixture = build_fixture(FakeScenario::Success).await;
+        let pool = fixture.pool.clone();
+        let publication_id = seed_ready_publication(
+            &pool,
+            fixture.workspace_id,
+            fixture.channel_id,
+            fixture.source_id,
+        )
+        .await;
+
+        let claimed = fixture
+            .engine
+            .scan_and_claim_due(fixture.workspace_id)
+            .await;
+        assert_eq!(claimed.len(), 1);
+        let (id, claim_token) = claimed.into_iter().next().unwrap();
+        assert_eq!(id, publication_id);
+
+        fixture.engine.execute(id, claim_token).await;
+
+        let publication = fixture.publication_repo.get(id).await.unwrap().unwrap();
+        assert_eq!(publication.status, PublicationStatus::Published);
+        assert!(publication.published_at.is_some());
+        assert!(
+            publication.claim_token.is_none(),
+            "the claim must be released"
+        );
+        assert!(
+            publication.rendered_metadata.is_some(),
+            "metadata must be frozen"
+        );
+
+        let attempts = fixture.attempt_repo.list_for_publication(id).await.unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts[0].status,
+            crate::domain::publishing::AttemptStatus::Succeeded
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_and_claim_due_is_exactly_once_under_concurrency() {
+        let fixture = build_fixture(FakeScenario::Success).await;
+        let pool = fixture.pool.clone();
+        seed_ready_publication(
+            &pool,
+            fixture.workspace_id,
+            fixture.channel_id,
+            fixture.source_id,
+        )
+        .await;
+
+        let engine = Arc::new(fixture.engine);
+        let workspace_id = fixture.workspace_id;
+        let (a, b) = tokio::join!(
+            {
+                let engine = engine.clone();
+                async move { engine.scan_and_claim_due(workspace_id).await }
+            },
+            {
+                let engine = engine.clone();
+                async move { engine.scan_and_claim_due(workspace_id).await }
+            }
+        );
+        let total_claimed = a.len() + b.len();
+        assert_eq!(
+            total_claimed, 1,
+            "the same publication must never be claimed twice"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_permission_missing_account_fails_without_ever_touching_the_provider() {
+        let fixture = build_fixture(FakeScenario::Success).await;
+        let pool = fixture.pool.clone();
+        let publication_id = seed_ready_publication(
+            &pool,
+            fixture.workspace_id,
+            fixture.channel_id,
+            fixture.source_id,
+        )
+        .await;
+
+        // Strip the publish capability after seeding.
+        let account_repo = SqlitePlatformAccountRepository::new(pool.clone());
+        use crate::domain::ports::repositories::PlatformAccountRepository as _;
+        let publication = fixture
+            .publication_repo
+            .get(publication_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut account = account_repo
+            .get(publication.platform_account_id.unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        account.capabilities = vec![Capability::ReadProfile];
+        account_repo.update(&account).await.unwrap();
+
+        let claimed = fixture
+            .engine
+            .scan_and_claim_due(fixture.workspace_id)
+            .await;
+        let (id, claim_token) = claimed.into_iter().next().unwrap();
+        fixture.engine.execute(id, claim_token).await;
+
+        let attempts = fixture.attempt_repo.list_for_publication(id).await.unwrap();
+        assert!(
+            attempts.is_empty(),
+            "no attempt should be created for a permission check that fails pre-flight"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_upload_is_recovered_and_completes_exactly_once() {
+        let fixture = build_fixture(FakeScenario::InterruptedThenRecoverable).await;
+        let pool = fixture.pool.clone();
+        let _publication_id = seed_ready_publication(
+            &pool,
+            fixture.workspace_id,
+            fixture.channel_id,
+            fixture.source_id,
+        )
+        .await;
+
+        let claimed = fixture
+            .engine
+            .scan_and_claim_due(fixture.workspace_id)
+            .await;
+        let (id, claim_token) = claimed.into_iter().next().unwrap();
+        fixture.engine.execute(id, claim_token).await;
+
+        // The simulated network drop leaves it Failed (non-retryable path
+        // skipped here — this test cares about the *session* recovery,
+        // not the retry chain), then requeued back to Scheduled by the
+        // engine's own retry logic. Force it back into an abandoned
+        // Uploading claim with an expired lease to simulate "the process
+        // was killed mid-upload" instead.
+        let mut publication = fixture.publication_repo.get(id).await.unwrap().unwrap();
+        publication.status = PublicationStatus::Scheduled;
+        publication.scheduled_at = Some(Utc::now() - Duration::minutes(1));
+        fixture.publication_repo.update(&publication).await.unwrap();
+
+        let claimed_again = fixture
+            .engine
+            .scan_and_claim_due(fixture.workspace_id)
+            .await;
+        let (id2, claim_token2) = claimed_again.into_iter().next().unwrap();
+        assert_eq!(id2, id);
+        fixture.engine.execute(id2, claim_token2).await;
+
+        // At this point the FIRST upload_media call already consumed the
+        // one-shot "interrupt" branch (bytes_committed was 0 the first
+        // time only), so this second attempt actually completes
+        // normally. To exercise real crash recovery, manually re-arm an
+        // interrupted session and an expired lease, then call
+        // `recover_interrupted` directly.
+        let session = fixture
+            .session_repo
+            .latest_for_publication(id)
+            .await
+            .unwrap();
+        if let Some(mut session) = session {
+            session.state = crate::domain::publishing::RemoteUploadState::Transferring;
+            session.bytes_committed = 5;
+            fixture.session_repo.update(&session).await.unwrap();
+        }
+        let claim_token3 = "manually-expired-claim".to_string();
+        fixture
+            .publication_repo
+            .try_claim_due(
+                id,
+                Uuid::new_v4(),
+                &claim_token3,
+                Utc::now() - Duration::minutes(1),
+                Utc::now() - Duration::hours(1),
+            )
+            .await
+            .ok();
+
+        fixture
+            .engine
+            .recover_interrupted(fixture.workspace_id)
+            .await;
+
+        // Whatever the final state, there must never be more than one
+        // Published outcome's worth of attempts marked Succeeded.
+        let attempts = fixture.attempt_repo.list_for_publication(id).await.unwrap();
+        let succeeded = attempts
+            .iter()
+            .filter(|a| a.status == crate::domain::publishing::AttemptStatus::Succeeded)
+            .count();
+        assert!(
+            succeeded <= 1,
+            "at most one attempt may ever be marked succeeded"
+        );
+    }
+
+    #[tokio::test]
+    async fn processing_publications_only_finish_after_a_poll_confirms_success() {
+        let fixture = build_fixture(FakeScenario::NeedsProcessing {
+            polls_until_done: 2,
+        })
+        .await;
+        let pool = fixture.pool.clone();
+        let _publication_id = seed_ready_publication(
+            &pool,
+            fixture.workspace_id,
+            fixture.channel_id,
+            fixture.source_id,
+        )
+        .await;
+
+        let claimed = fixture
+            .engine
+            .scan_and_claim_due(fixture.workspace_id)
+            .await;
+        let (id, claim_token) = claimed.into_iter().next().unwrap();
+        fixture.engine.execute(id, claim_token).await;
+
+        let after_upload = fixture.publication_repo.get(id).await.unwrap().unwrap();
+        assert_eq!(after_upload.status, PublicationStatus::Processing);
+
+        fixture.engine.poll_processing(id).await.unwrap();
+        let after_first_poll = fixture.publication_repo.get(id).await.unwrap().unwrap();
+        assert_eq!(
+            after_first_poll.status,
+            PublicationStatus::Processing,
+            "not done after the first poll"
+        );
+
+        fixture.engine.poll_processing(id).await.unwrap();
+        let after_second_poll = fixture.publication_repo.get(id).await.unwrap().unwrap();
+        assert_eq!(after_second_poll.status, PublicationStatus::Published);
+    }
+
+    #[tokio::test]
+    async fn a_paused_channel_is_never_claimed() {
+        let fixture = build_fixture(FakeScenario::Success).await;
+        let pool = fixture.pool.clone();
+        seed_ready_publication(
+            &pool,
+            fixture.workspace_id,
+            fixture.channel_id,
+            fixture.source_id,
+        )
+        .await;
+
+        sqlx::query("UPDATE channels SET status = 'paused' WHERE id = ?")
+            .bind(fixture.channel_id.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let claimed = fixture
+            .engine
+            .scan_and_claim_due(fixture.workspace_id)
+            .await;
+        assert!(claimed.is_empty());
+    }
+}

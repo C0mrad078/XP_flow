@@ -81,8 +81,15 @@ pub trait PlatformPublisher: Send + Sync {
     /// Streams `video`'s file per this provider's transport (resumable /
     /// chunked / stepwise — section 41: always from disk, never buffering
     /// the whole file in memory), reporting acknowledged progress through
-    /// `progress`. Checks `cancel` between chunks. Returns the session
-    /// with updated `bytes_committed`/`state`.
+    /// `progress`. Checks `cancel` between chunks.
+    ///
+    /// Always returns the session with whatever `bytes_committed`/`state`
+    /// it actually reached — including on failure, deliberately: a
+    /// network drop partway through has real, useful partial-progress
+    /// information (how much was actually committed, whether the
+    /// provider's own state ever left `Initialized`) that the caller
+    /// needs to persist so a later `recover_upload` call knows whether
+    /// resuming is possible instead of guessing (section 42/88).
     async fn upload_media(
         &self,
         access_token: &str,
@@ -90,7 +97,7 @@ pub trait PlatformPublisher: Send + Sync {
         video: &Video,
         progress: ProgressSender,
         cancel: CancelSignal,
-    ) -> Result<UploadSession, PublishError>;
+    ) -> (UploadSession, Result<(), PublishError>);
 
     /// The provider-specific "make it actually post" step where one
     /// exists (TikTok/Kwai's explicit publish call). A no-op passthrough

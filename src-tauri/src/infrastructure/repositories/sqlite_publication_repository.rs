@@ -219,7 +219,7 @@ impl PublicationRepository for SqlitePublicationRepository {
             };
         let result = sqlx::query(
             "UPDATE publications SET status = ?, remote_id = ?, retry_count = ?, last_error = ?, \
-             rendered_metadata_json = ?, claim_token = ?, lease_expires_at = ?, published_at = COALESCE(?, published_at), updated_at = ? \
+             rendered_metadata_json = COALESCE(?, rendered_metadata_json), claim_token = ?, lease_expires_at = ?, published_at = COALESCE(?, published_at), updated_at = ? \
              WHERE id = ? AND claim_token = ?",
         )
         .bind(update.status.as_str())
