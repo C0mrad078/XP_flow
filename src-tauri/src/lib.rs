@@ -44,7 +44,9 @@ use domain::ports::repositories::{
 };
 use infrastructure::auth::{AuthBrokerConfig, BrokerClient};
 use infrastructure::connectors::kwai::{KwaiAuthProvider, KwaiConnector};
-use infrastructure::connectors::tiktok::{TikTokAuthConfig, TikTokAuthProvider, TikTokConnector};
+use infrastructure::connectors::tiktok::{
+    TikTokAuthConfig, TikTokAuthProvider, TikTokConnector, TikTokUploader,
+};
 use infrastructure::connectors::youtube::api_client::YouTubeApiClient;
 use infrastructure::connectors::youtube::{
     YouTubeAuthConfig, YouTubeAuthProvider, YouTubeConnector, YouTubeUploader,
@@ -440,15 +442,13 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
     // above.
     let mut publishers: std::collections::HashMap<Platform, Arc<dyn PlatformPublisher>> =
         std::collections::HashMap::new();
-    for platform in [Platform::TikTok, Platform::Kwai] {
-        publishers.insert(
-            platform,
-            Arc::new(StubPublisher::new(
-                platform,
-                "real publishing for this platform is not implemented in this build",
-            )),
-        );
-    }
+    publishers.insert(
+        Platform::Kwai,
+        Arc::new(StubPublisher::new(
+            Platform::Kwai,
+            "real publishing for this platform is not implemented in this build",
+        )),
+    );
     publishers.insert(
         Platform::YouTube,
         if youtube_configured {
@@ -457,6 +457,17 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
             Arc::new(StubPublisher::new(
                 Platform::YouTube,
                 "YOUTUBE_CLIENT_ID is not configured",
+            )) as Arc<dyn PlatformPublisher>
+        },
+    );
+    publishers.insert(
+        Platform::TikTok,
+        if tiktok_config.is_some() && broker_client.is_some() {
+            Arc::new(TikTokUploader::new()) as Arc<dyn PlatformPublisher>
+        } else {
+            Arc::new(StubPublisher::new(
+                Platform::TikTok,
+                "TIKTOK_CLIENT_KEY is not configured or the Auth Broker is unavailable",
             )) as Arc<dyn PlatformPublisher>
         },
     );
