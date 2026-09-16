@@ -398,6 +398,20 @@ impl PublishingEngineService {
         }
     }
 
+    /// Every currently-`Processing` publication in the workspace — the
+    /// candidate list `spawn_periodic_processing_poll` iterates. A plain
+    /// filtered list, not a claim: polling doesn't need exclusivity (see
+    /// `try_finish_processing`'s doc comment).
+    pub async fn list_processing(&self, workspace_id: Uuid) -> Vec<Uuid> {
+        let mut query = crate::domain::publication_query::PublicationListQuery::new(workspace_id);
+        query.statuses = Some(vec![PublicationStatus::Processing]);
+        query.page_size = 500;
+        match self.publication_repo.list_paginated(&query).await {
+            Ok(page) => page.items.into_iter().map(|p| p.id).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// Polls a `Processing` publication's remote status (section 45/56).
     /// Read-only until a terminal result appears — never re-uploads.
     pub async fn poll_processing(&self, publication_id: Uuid) -> Result<(), PublishError> {

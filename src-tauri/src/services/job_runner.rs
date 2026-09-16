@@ -220,6 +220,84 @@ impl JobRunner {
     }
 
     // ---------------------------------------------------------------
+    // Publishing engine (Phase 5, section 14/85/122) — same "reuse
+    // JobRunner, don't build a second worker system" discipline as the
+    // token-refresh sweep above. `engine` is a parameter, not a stored
+    // field, for the same reason.
+    // ---------------------------------------------------------------
+
+    /// Scans for due publications on a timer and hands each successfully
+    /// claimed one to a bounded-concurrency execution task. Claiming
+    /// (`PublishingEngineService::scan_and_claim_due`) is what actually
+    /// guarantees exactly-once — the `Job` row created here is
+    /// idempotency/crash bookkeeping on top of that (section 122), not
+    /// the safety mechanism itself.
+    pub fn spawn_periodic_publish_scan(
+        self: Arc<Self>,
+        engine: Arc<crate::application::publishing_engine_service::PublishingEngineService>,
+        workspace_id: Uuid,
+        interval: Duration,
+        max_concurrent_uploads: usize,
+    ) {
+        let semaphore = Arc::new(Semaphore::new(max_concurrent_uploads.max(1)));
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            loop {
+                ticker.tick().await;
+                let claimed = engine.scan_and_claim_due(workspace_id).await;
+                for (publication_id, claim_token) in claimed {
+                    let job = Job::new(
+                        JobType::PublishVideo,
+                        json!({ "publication_id": publication_id }).to_string(),
+                        Some(format!("publish:{publication_id}")),
+                    );
+                    let job_id = job.id;
+                    let Ok(enqueued) = self.job_repo.enqueue(&job).await else {
+                        continue;
+                    };
+                    if enqueued.id != job_id {
+                        // Another in-flight job already owns this
+                        // publication — should be structurally
+                        // impossible given the claim already succeeded,
+                        // but never double-execute regardless.
+                        continue;
+                    }
+                    let _ = self.job_repo.mark_running(job_id).await;
+
+                    let engine = engine.clone();
+                    let job_repo = self.job_repo.clone();
+                    let semaphore = semaphore.clone();
+                    tokio::spawn(async move {
+                        let _permit = semaphore.acquire().await;
+                        engine.execute(publication_id, claim_token).await;
+                        let _ = job_repo.mark_succeeded(job_id).await;
+                    });
+                }
+            }
+        });
+    }
+
+    /// Polls every `Processing` publication on a timer. Read-heavy and
+    /// idempotent (section 149) — no `Job` row, no claim, just a status
+    /// check per publication per tick.
+    pub fn spawn_periodic_processing_poll(
+        self: Arc<Self>,
+        engine: Arc<crate::application::publishing_engine_service::PublishingEngineService>,
+        workspace_id: Uuid,
+        interval: Duration,
+    ) {
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            loop {
+                ticker.tick().await;
+                for publication_id in engine.list_processing(workspace_id).await {
+                    let _ = engine.poll_processing(publication_id).await;
+                }
+            }
+        });
+    }
+
+    // ---------------------------------------------------------------
     // Folder watcher dispatch
     // ---------------------------------------------------------------
 

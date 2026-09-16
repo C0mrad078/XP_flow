@@ -17,10 +17,12 @@ use std::time::Duration;
 use application::activity_service::ActivityService;
 use application::channel_service::ChannelService;
 use application::content_service::ContentService;
+use application::credential_acquisition_service::CredentialAcquisitionService;
 use application::media_ingestion_service::MediaIngestionService;
 use application::platform_account_service::PlatformAccountService;
 use application::platform_auth_service::PlatformAuthService;
 use application::publication_service::PublicationService;
+use application::publishing_engine_service::PublishingEngineService;
 use application::schedule_slot_service::ScheduleSlotService;
 use application::scheduler_service::SchedulerService;
 use application::settings_service::SettingsService;
@@ -33,11 +35,12 @@ use domain::ports::hashing::{ContentHashService, PerceptualHashService};
 use domain::ports::media_service::{MediaProbeService, MediaService, ThumbnailService};
 use domain::ports::platform_auth_provider::PlatformAuthProvider;
 use domain::ports::platform_connector::PlatformConnector;
+use domain::ports::platform_publisher::PlatformPublisher;
 use domain::ports::repositories::{
     ActivityRepository, ChannelRepository, DuplicateMatchRepository, NotificationRepository,
-    PlatformAccountRepository, PublicationRepository, QueueItemRepository,
-    ScheduleExceptionRepository, ScheduleSlotRepository, SettingsRepository, VideoRepository,
-    VideoSourceRepository, WorkspaceRepository,
+    PlatformAccountRepository, PublicationAttemptRepository, PublicationRepository,
+    QueueItemRepository, ScheduleExceptionRepository, ScheduleSlotRepository, SettingsRepository,
+    UploadSessionRepository, VideoRepository, VideoSourceRepository, WorkspaceRepository,
 };
 use infrastructure::auth::{AuthBrokerConfig, BrokerClient};
 use infrastructure::connectors::kwai::{KwaiAuthProvider, KwaiConnector};
@@ -49,12 +52,14 @@ use infrastructure::connectors::youtube::{
 use infrastructure::connectors::{StubAuthProvider, StubConnector};
 use infrastructure::hashing::{DHashPerceptualHashService, Sha256ContentHashService};
 use infrastructure::media::{FfmpegMediaService, FfmpegThumbnailService, FfprobeMediaProbeService};
+use infrastructure::publishing::StubPublisher;
 use infrastructure::repositories::{
     SqliteActivityRepository, SqliteChannelRepository, SqliteDuplicateMatchRepository,
     SqliteJobRepository, SqliteNotificationRepository, SqlitePlatformAccountRepository,
-    SqlitePublicationRepository, SqliteQueueItemRepository, SqliteScheduleExceptionRepository,
-    SqliteScheduleSlotRepository, SqliteSettingsRepository, SqliteVideoRepository,
-    SqliteVideoSourceRepository, SqliteWorkspaceRepository,
+    SqlitePublicationAttemptRepository, SqlitePublicationRepository, SqliteQueueItemRepository,
+    SqliteScheduleExceptionRepository, SqliteScheduleSlotRepository, SqliteSettingsRepository,
+    SqliteUploadSessionRepository, SqliteVideoRepository, SqliteVideoSourceRepository,
+    SqliteWorkspaceRepository,
 };
 use infrastructure::watcher::FolderWatcherService;
 use jobs::JobRepository;
@@ -78,6 +83,14 @@ const PERIODIC_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// between "a token could have been refreshed" and "it actually was"
 /// small.
 const TOKEN_REFRESH_SWEEP_INTERVAL: Duration = Duration::from_secs(15 * 60);
+/// Section 85: not a busy-loop — checks for due publications this often.
+const PUBLISH_SCAN_INTERVAL: Duration = Duration::from_secs(30);
+/// Section 125: processing polls are cheap reads, but still bounded —
+/// nowhere near "every second for hours."
+const PROCESSING_POLL_INTERVAL: Duration = Duration::from_secs(60);
+/// Section 79/131: a conservative default until Settings → Publishing
+/// exposes this as a real, user-configurable knob.
+const DEFAULT_MAX_CONCURRENT_UPLOADS: usize = 2;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -228,6 +241,10 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         Arc::new(SqliteScheduleExceptionRepository::new(pool.clone()));
     let platform_account_repo: Arc<dyn PlatformAccountRepository> =
         Arc::new(SqlitePlatformAccountRepository::new(pool.clone()));
+    let publication_attempt_repo: Arc<dyn PublicationAttemptRepository> =
+        Arc::new(SqlitePublicationAttemptRepository::new(pool.clone()));
+    let upload_session_repo: Arc<dyn UploadSessionRepository> =
+        Arc::new(SqliteUploadSessionRepository::new(pool.clone()));
 
     let media_service: Arc<dyn MediaService> = Arc::new(FfmpegMediaService::new());
     let probe_service: Arc<dyn MediaProbeService> = Arc::new(FfprobeMediaProbeService::new());
@@ -263,8 +280,8 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         schedule_exception_repo.clone(),
     ));
     let scheduler_service = Arc::new(SchedulerService::new(
-        publication_repo,
-        channel_repo,
+        publication_repo.clone(),
+        channel_repo.clone(),
         workspace_repo,
         schedule_slot_repo,
         schedule_exception_repo,
@@ -390,16 +407,56 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         }
     }
 
+    // Cloned before `connectors` is moved into `PlatformAuthService`
+    // below — `CredentialAcquisitionService` needs its own copy of the
+    // same connector instances (each `Arc<dyn PlatformConnector>` is
+    // cheap to clone).
+    let connectors_for_credentials = connectors.clone();
+
     let platform_auth_service = Arc::new(PlatformAuthService::new(
         auth_providers,
         connectors,
-        platform_account_repo,
+        platform_account_repo.clone(),
         activity_service.clone(),
         notification_service.clone(),
     ));
     let token_lifecycle_service = Arc::new(TokenLifecycleService::new(
         Arc::new(SqlitePlatformAccountRepository::new(pool.clone())),
         platform_auth_service.clone(),
+    ));
+
+    let credential_service = Arc::new(CredentialAcquisitionService::new(
+        connectors_for_credentials,
+        platform_auth_service.clone(),
+    ));
+    // Real per-provider `PlatformPublisher` implementations land as each
+    // one is built (section 7); until then every platform degrades to a
+    // clear `PlatformNotApproved` instead of crashing or silently doing
+    // nothing, same graceful-degradation discipline as the auth stubs
+    // above.
+    let mut publishers: std::collections::HashMap<Platform, Arc<dyn PlatformPublisher>> =
+        std::collections::HashMap::new();
+    for platform in [Platform::YouTube, Platform::TikTok, Platform::Kwai] {
+        publishers.insert(
+            platform,
+            Arc::new(StubPublisher::new(
+                platform,
+                "real publishing for this platform is not implemented in this build",
+            )),
+        );
+    }
+    let publishing_engine_service = Arc::new(PublishingEngineService::new(
+        publication_repo.clone(),
+        publication_attempt_repo,
+        upload_session_repo,
+        video_repo.clone(),
+        platform_account_repo,
+        channel_repo.clone(),
+        hash_service.clone(),
+        credential_service,
+        publishers,
+        activity_service.clone(),
+        notification_service.clone(),
     ));
 
     let ingestion = Arc::new(MediaIngestionService::new(
@@ -472,6 +529,24 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
             TOKEN_REFRESH_SWEEP_INTERVAL,
         );
 
+        // Section 88/123: reconcile any claim abandoned by a process that
+        // was killed mid-upload *before* the periodic scan below can
+        // claim anything new.
+        publishing_engine_service
+            .recover_interrupted(workspace.id)
+            .await;
+        job_runner.clone().spawn_periodic_publish_scan(
+            publishing_engine_service.clone(),
+            workspace.id,
+            PUBLISH_SCAN_INTERVAL,
+            DEFAULT_MAX_CONCURRENT_UPLOADS,
+        );
+        job_runner.clone().spawn_periodic_processing_poll(
+            publishing_engine_service.clone(),
+            workspace.id,
+            PROCESSING_POLL_INTERVAL,
+        );
+
         // Queue reconciliation (section 91/113): catches queue/schedule
         // drift (e.g. an orphaned QueueItem left behind by a crash between
         // two writes) on every startup, the same "never silently discard"
@@ -503,6 +578,7 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         platform_account_service,
         platform_auth_service,
         token_lifecycle_service,
+        publishing_engine_service,
         job_runner,
         video_repo,
         paths,

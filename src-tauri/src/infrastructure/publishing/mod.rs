@@ -5,5 +5,7 @@
 //! simulation mode uses instead (section 142/161).
 
 pub mod fake_publisher;
+pub mod stub_publisher;
 
 pub use fake_publisher::{FakePublisher, FakeScenario};
+pub use stub_publisher::StubPublisher;
