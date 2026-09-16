@@ -15,8 +15,8 @@ use crate::domain::publishing::{
 };
 use crate::domain::video::Video;
 use crate::infrastructure::publishing::http_client::{
-    build_upload_http_client, PROCESSING_STATUS_TIMEOUT, UPLOAD_CHUNK_TIMEOUT,
-    UPLOAD_CONTROL_TIMEOUT,
+    build_upload_http_client, parse_retry_after_seconds, PROCESSING_STATUS_TIMEOUT,
+    UPLOAD_CHUNK_TIMEOUT, UPLOAD_CONTROL_TIMEOUT,
 };
 
 const CREATOR_INFO_PATH: &str = "https://open.tiktokapis.com/v2/post/publish/creator_info/query/";
@@ -219,6 +219,7 @@ async fn parse_envelope<T: for<'de> Deserialize<'de>>(
     response: reqwest::Response,
 ) -> Result<T, PublishError> {
     let status = response.status();
+    let retry_after_seconds = parse_retry_after_seconds(response.headers());
     let envelope: Envelope<T> = response.json().await.map_err(|e| PublishError::Internal {
         detail: e.to_string(),
     })?;
@@ -231,10 +232,14 @@ async fn parse_envelope<T: for<'de> Deserialize<'de>>(
         code: "unknown".to_string(),
         message: format!("TikTok returned HTTP {status} with no error detail"),
     });
-    Err(classify_api_error(&error.code, &error.message))
+    Err(classify_api_error(
+        &error.code,
+        &error.message,
+        retry_after_seconds,
+    ))
 }
 
-fn classify_api_error(code: &str, message: &str) -> PublishError {
+fn classify_api_error(code: &str, message: &str, retry_after_seconds: Option<u64>) -> PublishError {
     match code {
         "ok" => PublishError::Internal {
             detail: format!("unexpected ok error envelope: {message}"),
@@ -243,7 +248,7 @@ fn classify_api_error(code: &str, message: &str) -> PublishError {
             PublishError::AuthExpired
         }
         "rate_limit_exceeded" => PublishError::RateLimited {
-            retry_after_seconds: None,
+            retry_after_seconds,
         },
         "spam_risk_too_many_posts" | "spam_risk_user_banned_from_posting" => {
             PublishError::PlatformNotApproved {
@@ -490,6 +495,14 @@ impl PlatformPublisher for TikTokUploader {
                 session.state = RemoteUploadState::NotStarted;
                 session.remote_upload_url = None;
                 return (session, Err(PublishError::UploadSessionExpired));
+            } else if status.as_u16() == 429 {
+                session.state = RemoteUploadState::Transferring;
+                return (
+                    session,
+                    Err(PublishError::RateLimited {
+                        retry_after_seconds: parse_retry_after_seconds(response.headers()),
+                    }),
+                );
             } else if status.is_server_error() {
                 session.state = RemoteUploadState::Transferring;
                 return (

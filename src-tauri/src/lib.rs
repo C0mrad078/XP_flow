@@ -22,6 +22,7 @@ use application::media_ingestion_service::MediaIngestionService;
 use application::metadata_template_service::MetadataTemplateService;
 use application::platform_account_service::PlatformAccountService;
 use application::platform_auth_service::PlatformAuthService;
+use application::provider_rate_limit_service::ProviderRateLimitService;
 use application::publication_service::PublicationService;
 use application::publishing_engine_service::PublishingEngineService;
 use application::publishing_readiness_service::PublishingReadinessService;
@@ -63,10 +64,11 @@ use infrastructure::repositories::{
     SqliteActivityRepository, SqliteChannelRepository, SqliteDuplicateMatchRepository,
     SqliteHashtagSetRepository, SqliteJobRepository, SqliteMetadataTemplateRepository,
     SqliteNotificationRepository, SqlitePlatformAccountRepository,
-    SqlitePublicationAttemptRepository, SqlitePublicationConsentRepository,
-    SqlitePublicationRepository, SqliteQueueItemRepository, SqliteScheduleExceptionRepository,
-    SqliteScheduleSlotRepository, SqliteSettingsRepository, SqliteUploadSessionRepository,
-    SqliteVideoRepository, SqliteVideoSourceRepository, SqliteWorkspaceRepository,
+    SqliteProviderRateStateRepository, SqlitePublicationAttemptRepository,
+    SqlitePublicationConsentRepository, SqlitePublicationRepository, SqliteQueueItemRepository,
+    SqliteScheduleExceptionRepository, SqliteScheduleSlotRepository, SqliteSettingsRepository,
+    SqliteUploadSessionRepository, SqliteVideoRepository, SqliteVideoSourceRepository,
+    SqliteWorkspaceRepository,
 };
 use infrastructure::watcher::FolderWatcherService;
 use jobs::JobRepository;
@@ -172,6 +174,19 @@ pub fn run() {
             commands::publishing_commands::get_publication_attempts,
             commands::publishing_commands::get_publication_readiness,
             commands::publishing_commands::record_publication_consent,
+            commands::publishing_commands::get_provider_rate_state,
+            commands::metadata_commands::preview_publication_metadata,
+            commands::metadata_commands::get_rendered_metadata,
+            commands::metadata_commands::validate_publication_metadata,
+            commands::metadata_commands::update_publication_metadata,
+            commands::metadata_commands::list_metadata_templates,
+            commands::metadata_commands::create_metadata_template,
+            commands::metadata_commands::update_metadata_template,
+            commands::metadata_commands::delete_metadata_template,
+            commands::metadata_commands::list_hashtag_sets,
+            commands::metadata_commands::create_hashtag_set,
+            commands::metadata_commands::update_hashtag_set,
+            commands::metadata_commands::delete_hashtag_set,
             commands::scheduler_commands::schedule_publication,
             commands::scheduler_commands::unschedule_publication,
             commands::scheduler_commands::reschedule_publication_to_date,
@@ -496,6 +511,9 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         channel_repo.clone(),
         publishers.clone(),
     ));
+    let provider_rate_limit_service = Arc::new(ProviderRateLimitService::new(Arc::new(
+        SqliteProviderRateStateRepository::new(pool.clone()),
+    )));
     let publishing_engine_service = Arc::new(PublishingEngineService::new(
         publication_repo.clone(),
         publication_attempt_repo,
@@ -507,6 +525,7 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         hash_service.clone(),
         credential_service,
         metadata_template_service.clone(),
+        provider_rate_limit_service.clone(),
         publishers.clone(),
         activity_service.clone(),
         notification_service.clone(),
@@ -641,6 +660,7 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         publishing_engine_service,
         publishing_readiness_service,
         metadata_template_service,
+        provider_rate_limit_service,
         job_runner,
         video_repo,
         paths,

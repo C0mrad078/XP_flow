@@ -24,3 +24,48 @@ pub fn build_upload_http_client() -> reqwest::Client {
         .build()
         .expect("building the upload HTTP client with static configuration cannot fail")
 }
+
+/// Parses a `Retry-After` response header's delay-seconds form (RFC 9110
+/// §10.2.3) — the form every provider this codebase talks to actually
+/// sends. The header's alternative HTTP-date form is not implemented (no
+/// provider observed here uses it); an unparseable or absent header
+/// yields `None` rather than a guess, which callers already treat as "no
+/// provider-supplied timing, fall back to the generic retry policy"
+/// (Phase 5.1 section 18/20).
+pub fn parse_retry_after_seconds(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_a_plain_delay_seconds_header() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "120".parse().unwrap());
+        assert_eq!(parse_retry_after_seconds(&headers), Some(120));
+    }
+
+    #[test]
+    fn returns_none_when_the_header_is_absent() {
+        let headers = reqwest::header::HeaderMap::new();
+        assert_eq!(parse_retry_after_seconds(&headers), None);
+    }
+
+    #[test]
+    fn returns_none_for_an_http_date_form_it_does_not_parse() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            "Wed, 21 Oct 2026 07:28:00 GMT".parse().unwrap(),
+        );
+        assert_eq!(parse_retry_after_seconds(&headers), None);
+    }
+}

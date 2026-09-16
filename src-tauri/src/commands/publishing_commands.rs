@@ -1,6 +1,7 @@
 use tauri::State;
 use uuid::Uuid;
 
+use crate::application::provider_rate_limit_service::ProviderRateLimitStatus;
 use crate::domain::publishing::{ApprovalSource, PublicationAttempt};
 use crate::domain::readiness::ReadinessIssue;
 use crate::error::AppError;
@@ -77,4 +78,18 @@ pub async fn record_publication_consent(
         .publishing_engine_service
         .record_consent(publication_id, approval_source)
         .await?)
+}
+
+/// This account's currently-known rate-limit state per operation class
+/// (section 23/59) — an empty `limited_until` means "not currently
+/// limited," not "never limited."
+#[tauri::command]
+pub async fn get_provider_rate_state(
+    state: State<'_, AppState>,
+    platform_account_id: Uuid,
+) -> Result<Vec<ProviderRateLimitStatus>, AppError> {
+    Ok(state
+        .provider_rate_limit_service
+        .get_state(platform_account_id)
+        .await)
 }

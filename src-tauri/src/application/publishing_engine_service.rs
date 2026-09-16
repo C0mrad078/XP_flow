@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::application::activity_service::ActivityService;
 use crate::application::credential_acquisition_service::CredentialAcquisitionService;
+use crate::application::provider_rate_limit_service::ProviderRateLimitService;
 use crate::domain::activity_event::{ActivityCategory, ActivityLevel};
 use crate::domain::channel::ChannelStatus;
 use crate::domain::platform::Platform;
@@ -21,7 +22,8 @@ use crate::domain::ports::repositories::{
 use crate::domain::publication::{Publication, PublicationStatus};
 use crate::domain::publishing::retry_policy::{attempts_exhausted, next_retry_at};
 use crate::domain::publishing::{
-    requires_express_consent, PublicationAttempt, PublishError, RemoteUploadState, RenderedMetadata,
+    requires_express_consent, PublicationAttempt, PublishError, RateLimitOperation,
+    RemoteUploadState, RenderedMetadata,
 };
 use crate::services::notification_service::NotificationService;
 
@@ -99,6 +101,7 @@ pub struct PublishingEngineService {
     content_hash_service: Arc<dyn ContentHashService>,
     credential_service: Arc<CredentialAcquisitionService>,
     metadata_service: Arc<crate::application::metadata_template_service::MetadataTemplateService>,
+    rate_limit_service: Arc<ProviderRateLimitService>,
     publishers: HashMap<Platform, Arc<dyn PlatformPublisher>>,
     activity_service: Arc<ActivityService>,
     notification_service: Arc<NotificationService>,
@@ -119,6 +122,7 @@ impl PublishingEngineService {
         metadata_service: Arc<
             crate::application::metadata_template_service::MetadataTemplateService,
         >,
+        rate_limit_service: Arc<ProviderRateLimitService>,
         publishers: HashMap<Platform, Arc<dyn PlatformPublisher>>,
         activity_service: Arc<ActivityService>,
         notification_service: Arc<NotificationService>,
@@ -134,6 +138,7 @@ impl PublishingEngineService {
             content_hash_service,
             credential_service,
             metadata_service,
+            rate_limit_service,
             publishers,
             activity_service,
             notification_service,
@@ -397,6 +402,30 @@ impl PublishingEngineService {
                 .await;
         }
 
+        // Section 22: never repeatedly hit a known rate limit — checked
+        // before any provider call, including before rendering metadata.
+        if !self
+            .rate_limit_service
+            .can_execute(account.id, RateLimitOperation::Publish)
+            .await
+        {
+            let retry_after_seconds = self
+                .rate_limit_service
+                .get_next_allowed_at(account.id, RateLimitOperation::Publish)
+                .await
+                .map(|at| (at - Utc::now()).num_seconds().max(0) as u64);
+            return self
+                .fail_and_release(
+                    &publication,
+                    claim_token,
+                    PublishError::RateLimited {
+                        retry_after_seconds,
+                    },
+                    0,
+                )
+                .await;
+        }
+
         let publisher = self
             .publishers
             .get(&publication.platform)
@@ -482,9 +511,22 @@ impl PublishingEngineService {
         let access_token = match self.credential_service.acquire(&account).await {
             Ok(token) => token,
             Err(err) => {
+                if let PublishError::RateLimited {
+                    retry_after_seconds,
+                } = &err
+                {
+                    let _ = self
+                        .rate_limit_service
+                        .record_rate_limited(
+                            account.id,
+                            RateLimitOperation::Auth,
+                            *retry_after_seconds,
+                        )
+                        .await;
+                }
                 return self
                     .finish_attempt_failure(&publication, claim_token, &mut attempt, err)
-                    .await
+                    .await;
             }
         };
 
@@ -540,6 +582,17 @@ impl PublishingEngineService {
             }
         };
         let _ = self.session_repo.update(&session).await;
+
+        // Reaching here means initialize/upload/finalize all completed
+        // without the provider ever reporting a rate limit — clear any
+        // stale window so a resolved limit doesn't keep blocking future
+        // attempts (section 19/85).
+        if let Some(account_id) = publication.platform_account_id {
+            let _ = self
+                .rate_limit_service
+                .record_success(account_id, RateLimitOperation::Publish)
+                .await;
+        }
 
         match session.state {
             RemoteUploadState::RemoteSucceeded => {
@@ -664,8 +717,40 @@ impl PublishingEngineService {
         let Some(publisher) = self.publishers.get(&publication.platform) else {
             return Ok(());
         };
+        if !self
+            .rate_limit_service
+            .can_execute(account.id, RateLimitOperation::Status)
+            .await
+        {
+            // Never poll a known-limited status endpoint again before its
+            // window clears (section 22) — simply skip this tick; the
+            // next periodic poll tries again automatically.
+            return Ok(());
+        }
         let access_token = self.credential_service.acquire(&account).await?;
-        let state = publisher.get_remote_status(&access_token, &session).await?;
+        let state = match publisher.get_remote_status(&access_token, &session).await {
+            Ok(state) => state,
+            Err(err) => {
+                if let PublishError::RateLimited {
+                    retry_after_seconds,
+                } = &err
+                {
+                    let _ = self
+                        .rate_limit_service
+                        .record_rate_limited(
+                            account.id,
+                            RateLimitOperation::Status,
+                            *retry_after_seconds,
+                        )
+                        .await;
+                }
+                return Err(err);
+            }
+        };
+        let _ = self
+            .rate_limit_service
+            .record_success(account.id, RateLimitOperation::Status)
+            .await;
 
         match state {
             RemoteUploadState::RemoteSucceeded => {
@@ -763,7 +848,7 @@ impl PublishingEngineService {
                     },
                 )
                 .await;
-            self.requeue_for_retry(&publication, publication.retry_count)
+            self.requeue_for_retry(&publication, publication.retry_count, None)
                 .await;
             return;
         }
@@ -857,7 +942,7 @@ impl PublishingEngineService {
                                 },
                             )
                             .await;
-                        self.requeue_for_retry(&publication, publication.retry_count + 1)
+                        self.requeue_for_retry(&publication, publication.retry_count + 1, None)
                             .await;
                     }
                 }
@@ -937,6 +1022,25 @@ impl PublishingEngineService {
         err: PublishError,
         attempt_number: i32,
     ) -> Result<(), PublishError> {
+        // Section 18/19: the engine is the one authoritative place a
+        // provider's rate-limit signal gets persisted — never the
+        // uploader itself.
+        if let (
+            PublishError::RateLimited {
+                retry_after_seconds,
+            },
+            Some(account_id),
+        ) = (&err, publication.platform_account_id)
+        {
+            let _ = self
+                .rate_limit_service
+                .record_rate_limited(
+                    account_id,
+                    RateLimitOperation::Publish,
+                    *retry_after_seconds,
+                )
+                .await;
+        }
         let retryable = err.is_retryable() && !attempts_exhausted(attempt_number);
         let released = self
             .publication_repo
@@ -958,8 +1062,12 @@ impl PublishingEngineService {
             .unwrap_or(false);
 
         if released && retryable {
-            self.requeue_for_retry(publication, publication.retry_count + 1)
-                .await;
+            self.requeue_for_retry(
+                publication,
+                publication.retry_count + 1,
+                err.retry_after_seconds(),
+            )
+            .await;
         } else if released {
             let _ = self
                 .notification_service
@@ -983,14 +1091,23 @@ impl PublishingEngineService {
     /// this is a plain `update()` call, not `update_execution_state`,
     /// because by the time this runs the claim has already been released
     /// and the row is no longer `Uploading`/`Processing` (section 73).
-    async fn requeue_for_retry(&self, publication: &Publication, attempt_number: i32) {
+    async fn requeue_for_retry(
+        &self,
+        publication: &Publication,
+        attempt_number: i32,
+        provider_retry_after_seconds: Option<u64>,
+    ) {
         let Ok(Some(mut fresh)) = self.publication_repo.get(publication.id).await else {
             return;
         };
         if fresh.status != PublicationStatus::Failed {
             return;
         }
-        let retry_at = next_retry_at(attempt_number.max(1), Utc::now(), None);
+        let retry_at = next_retry_at(
+            attempt_number.max(1),
+            Utc::now(),
+            provider_retry_after_seconds,
+        );
         if fresh.transition(PublicationStatus::RetryWait).is_err() {
             return;
         }
@@ -1176,6 +1293,15 @@ mod tests {
             Arc::new(Sha256ContentHashService),
             credential_service,
             metadata_service,
+            Arc::new(
+                crate::application::provider_rate_limit_service::ProviderRateLimitService::new(
+                    Arc::new(
+                        crate::infrastructure::repositories::SqliteProviderRateStateRepository::new(
+                            pool.clone(),
+                        ),
+                    ),
+                ),
+            ),
             publishers,
             activity_service,
             notification_service,
@@ -1742,5 +1868,56 @@ mod tests {
 
         let publication = fixture.publication_repo.get(id).await.unwrap().unwrap();
         assert_eq!(publication.status, PublicationStatus::Published);
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_account_is_never_dispatched_to_the_provider() {
+        let fixture = build_fixture(FakeScenario::Success).await;
+        let pool = fixture.pool.clone();
+        let publication_id = seed_ready_publication(
+            &pool,
+            fixture.workspace_id,
+            fixture.channel_id,
+            fixture.source_id,
+        )
+        .await;
+        let publication = fixture
+            .publication_repo
+            .get(publication_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let account_id = publication.platform_account_id.unwrap();
+
+        let rate_repo = crate::infrastructure::repositories::SqliteProviderRateStateRepository::new(
+            pool.clone(),
+        );
+        use crate::domain::ports::repositories::ProviderRateStateRepository;
+        rate_repo
+            .record_rate_limit(account_id, "publish", Utc::now() + Duration::minutes(30))
+            .await
+            .unwrap();
+
+        let claimed = fixture
+            .engine
+            .scan_and_claim_due(fixture.workspace_id)
+            .await;
+        let (id, claim_token) = claimed.into_iter().next().unwrap();
+        fixture.engine.execute(id, claim_token).await;
+
+        let updated = fixture.publication_repo.get(id).await.unwrap().unwrap();
+        assert_eq!(updated.status, PublicationStatus::Scheduled);
+        assert!(
+            updated
+                .scheduled_at
+                .is_some_and(|at| at > Utc::now() + Duration::minutes(25)),
+            "the retry must be scheduled for after the known rate-limit window clears"
+        );
+
+        let attempts = fixture.attempt_repo.list_for_publication(id).await.unwrap();
+        assert!(
+            attempts.is_empty(),
+            "a rate-limited account must never even reach attempt creation, let alone the provider"
+        );
     }
 }

@@ -15,8 +15,8 @@ use crate::domain::publishing::{
 };
 use crate::domain::video::Video;
 use crate::infrastructure::publishing::http_client::{
-    build_upload_http_client, PROCESSING_STATUS_TIMEOUT, UPLOAD_CHUNK_TIMEOUT,
-    UPLOAD_CONTROL_TIMEOUT,
+    build_upload_http_client, parse_retry_after_seconds, PROCESSING_STATUS_TIMEOUT,
+    UPLOAD_CHUNK_TIMEOUT, UPLOAD_CONTROL_TIMEOUT,
 };
 
 use super::config::KwaiPublishConfig;
@@ -150,18 +150,19 @@ impl KwaiUploader {
             .send()
             .await
             .map_err(map_transport_err)?;
+        let retry_after_seconds = parse_retry_after_seconds(response.headers());
         let body: StartUploadResponse =
             response.json().await.map_err(|e| PublishError::Internal {
                 detail: e.to_string(),
             })?;
         if body.base.result != 1 {
-            return Err(classify_result(&body.base.error_msg));
+            return Err(classify_result(&body.base.error_msg, retry_after_seconds));
         }
         Ok(body)
     }
 }
 
-fn classify_result(error_msg: &str) -> PublishError {
+fn classify_result(error_msg: &str, retry_after_seconds: Option<u64>) -> PublishError {
     // No official error-code table was available (see the module-level
     // honesty note) — this is best-effort substring matching on the
     // human-readable message, not a verified mapping.
@@ -170,7 +171,7 @@ fn classify_result(error_msg: &str) -> PublishError {
         PublishError::AuthExpired
     } else if lower.contains("frequen") || lower.contains("rate") || lower.contains("limit") {
         PublishError::RateLimited {
-            retry_after_seconds: None,
+            retry_after_seconds,
         }
     } else if lower.contains("permission") || lower.contains("scope") {
         PublishError::PermissionMissing {
@@ -324,6 +325,7 @@ impl PlatformPublisher for KwaiUploader {
                 }
             };
 
+            let retry_after_seconds = parse_retry_after_seconds(response.headers());
             let body: BaseResult = match response.json().await {
                 Ok(body) => body,
                 Err(_) => {
@@ -333,7 +335,10 @@ impl PlatformPublisher for KwaiUploader {
             };
             if body.result != 1 {
                 session.state = RemoteUploadState::Transferring;
-                return (session, Err(classify_result(&body.error_msg)));
+                return (
+                    session,
+                    Err(classify_result(&body.error_msg, retry_after_seconds)),
+                );
             }
 
             offset += this_chunk;
@@ -374,6 +379,7 @@ impl PlatformPublisher for KwaiUploader {
             .send()
             .await
             .map_err(map_transport_err)?;
+        let complete_retry_after_seconds = parse_retry_after_seconds(complete_response.headers());
         let complete_body: BaseResult =
             complete_response
                 .json()
@@ -384,7 +390,10 @@ impl PlatformPublisher for KwaiUploader {
         if complete_body.result != 1 {
             // Nothing published yet — safe to surface as a normal,
             // classifiable error and let the caller retry finalize.
-            return Err(classify_result(&complete_body.error_msg));
+            return Err(classify_result(
+                &complete_body.error_msg,
+                complete_retry_after_seconds,
+            ));
         }
 
         // The publish call is the exactly-once-critical remote write
@@ -416,6 +425,7 @@ impl PlatformPublisher for KwaiUploader {
                 return Err(PublishError::UnknownRemoteResult);
             }
         };
+        let publish_retry_after_seconds = parse_retry_after_seconds(publish_response.headers());
         let publish_body: PublishResponse = match publish_response.json().await {
             Ok(body) => body,
             Err(_) => {
@@ -426,7 +436,10 @@ impl PlatformPublisher for KwaiUploader {
         if publish_body.base.result != 1 {
             // A clean error response from Kwai — no post was created,
             // this is unambiguous and safe to classify normally.
-            return Err(classify_result(&publish_body.base.error_msg));
+            return Err(classify_result(
+                &publish_body.base.error_msg,
+                publish_retry_after_seconds,
+            ));
         }
         let Some(video_info) = publish_body.video_info else {
             session.state = RemoteUploadState::RemoteUnknown;
@@ -475,11 +488,12 @@ impl PlatformPublisher for KwaiUploader {
                 .send()
                 .await
                 .map_err(map_transport_err)?;
+            let retry_after_seconds = parse_retry_after_seconds(response.headers());
             let body: ListResponse = response.json().await.map_err(|e| PublishError::Internal {
                 detail: e.to_string(),
             })?;
             if body.base.result != 1 {
-                return Err(classify_result(&body.base.error_msg));
+                return Err(classify_result(&body.base.error_msg, retry_after_seconds));
             }
             if let Some(video) = body.video_list.iter().find(|v| &v.photo_id == photo_id) {
                 return Ok(if video.pending {

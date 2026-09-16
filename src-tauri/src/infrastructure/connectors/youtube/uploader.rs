@@ -16,8 +16,8 @@ use crate::domain::publishing::{
 };
 use crate::domain::video::Video;
 use crate::infrastructure::publishing::http_client::{
-    build_upload_http_client, PROCESSING_STATUS_TIMEOUT, UPLOAD_CHUNK_TIMEOUT,
-    UPLOAD_CONTROL_TIMEOUT,
+    build_upload_http_client, parse_retry_after_seconds, PROCESSING_STATUS_TIMEOUT,
+    UPLOAD_CHUNK_TIMEOUT, UPLOAD_CONTROL_TIMEOUT,
 };
 
 const UPLOAD_ENDPOINT: &str = "https://www.googleapis.com/upload/youtube/v3/videos";
@@ -208,7 +208,7 @@ impl PlatformPublisher for YouTubeUploader {
             .map_err(map_transport_err)?;
 
         if !response.status().is_success() {
-            return Err(classify_status(response.status().as_u16()));
+            return Err(classify_response(&response));
         }
         let upload_url = response
             .headers()
@@ -344,7 +344,7 @@ impl PlatformPublisher for YouTubeUploader {
                 return (session, Err(PublishError::UploadSessionExpired));
             } else {
                 session.state = RemoteUploadState::RemoteUnknown;
-                return (session, Err(classify_status(status)));
+                return (session, Err(classify_response(&response)));
             }
         }
 
@@ -384,7 +384,7 @@ impl PlatformPublisher for YouTubeUploader {
             .await
             .map_err(map_transport_err)?;
         if !response.status().is_success() {
-            return Err(classify_status(response.status().as_u16()));
+            return Err(classify_response(&response));
         }
         let body: VideoListResponse =
             response.json().await.map_err(|e| PublishError::Internal {
@@ -464,7 +464,7 @@ impl PlatformPublisher for YouTubeUploader {
                 session.remote_upload_url = None;
                 return Ok(session);
             }
-            other => return Err(classify_status(other)),
+            _ => return Err(classify_response(&response)),
         }
 
         let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -505,12 +505,13 @@ fn parse_range_upper_bound(range_header: &str) -> Option<i64> {
         .ok()
 }
 
-fn classify_status(status: u16) -> PublishError {
+fn classify_response(response: &reqwest::Response) -> PublishError {
+    let status = response.status().as_u16();
     match status {
         401 | 403 => PublishError::AuthExpired,
         404 => PublishError::UploadSessionExpired,
         429 => PublishError::RateLimited {
-            retry_after_seconds: None,
+            retry_after_seconds: parse_retry_after_seconds(response.headers()),
         },
         500..=599 => PublishError::ProviderServerError {
             status: Some(status),
@@ -633,6 +634,48 @@ mod tests {
         assert_eq!(session.state, RemoteUploadState::Transferred);
         assert_eq!(session.bytes_committed, 10);
         assert_eq!(session.remote_publish_id.as_deref(), Some("yt-video-123"));
+    }
+
+    #[tokio::test]
+    async fn a_429_with_retry_after_is_surfaced_with_the_real_wait_time() {
+        let server = MockServer::start().await;
+        let upload_path = "/upload/session/rate-limited";
+        Mock::given(method("PUT"))
+            .and(path(upload_path))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "120"))
+            .mount(&server)
+            .await;
+
+        let uploader = YouTubeUploader::with_base_url(&server.uri(), 8 * 1024 * 1024);
+        let dir = temp_dir("youtube-uploader-rate-limited");
+        let file_path = write_fake_video(&dir, "clip.mp4", b"0123456789");
+        let video = sample_video(&file_path, 10);
+
+        let mut session = UploadSession::new(
+            Uuid::nil(),
+            Uuid::nil(),
+            Platform::YouTube,
+            SessionType::Resumable,
+        );
+        session.remote_upload_url = Some(format!("{}{upload_path}", server.uri()));
+        session.bytes_total = Some(10);
+        session.state = RemoteUploadState::Initialized;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let (_session, result) = uploader
+            .upload_media("access-token", session, &video, tx, CancelSignal::new())
+            .await;
+
+        match result {
+            Err(PublishError::RateLimited {
+                retry_after_seconds: Some(120),
+            }) => {}
+            other => {
+                panic!("expected RateLimited{{retry_after_seconds: Some(120)}}, got {other:?}")
+            }
+        }
     }
 
     #[tokio::test]

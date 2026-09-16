@@ -8,6 +8,7 @@ pub mod channel_commands;
 pub mod content_commands;
 pub mod import_commands;
 pub mod media_protocol;
+pub mod metadata_commands;
 pub mod notification_commands;
 pub mod platform_account_commands;
 pub mod platform_auth_commands;

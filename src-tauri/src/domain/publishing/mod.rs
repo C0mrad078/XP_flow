@@ -2,6 +2,7 @@ pub mod attempt;
 pub mod consent;
 pub mod metadata;
 pub mod publish_error;
+pub mod rate_limit;
 pub mod remote_state;
 pub mod retry_policy;
 pub mod upload_session;
@@ -15,6 +16,7 @@ pub use metadata::{
     MetadataValidationIssue, MetadataValidationIssueCode, TemplateKind, TemplateVariables,
 };
 pub use publish_error::PublishError;
+pub use rate_limit::RateLimitOperation;
 pub use remote_state::RemoteUploadState;
 pub use upload_session::{SessionType, UploadSession};
 
