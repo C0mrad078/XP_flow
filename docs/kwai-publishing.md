@@ -65,3 +65,14 @@ environment — the same public/confidential split as TikTok's `client_key`/`cli
 None of the above has been exercised against a live Kwai account — no credentials were available in this
 environment. All 7 `KwaiUploader` tests run against a local `wiremock` server modeling the shapes described above,
 not the real API.
+
+## Phase 5.1 re-check
+
+Phase 5.1 explicitly asked for a fresh attempt at reaching Kwai's official documentation before reconciling or
+retaining this limitation. Two independent attempts were made: `open.kuaishou.com`'s open-platform page (the same
+host `KwaiUploader` talks to) returned only a client-rendered shell with no fetchable documentation content, and
+`kwai.com/explore/kwai-business-api-documentation` (surfaced by search as a plausible lead) turned out to be a
+general marketing page with no API reference at all. Neither attempt surfaced real, authoritative documentation.
+The implementation is therefore left exactly as it was — grounded in the unofficial `bububa/kwai-openapi` client,
+not rewritten based on guesswork — per the explicit instruction not to replace a working conservative
+implementation with speculation just because the gap is uncomfortable.

@@ -7,11 +7,15 @@ what happened along the way.
 This repository currently implements **Phase 1 (Foundation, Architecture, Desktop Shell and Design System)**,
 **Phase 2 (Media Library, Cut.pro Folder Watcher, FFmpeg Integration and Local Content Management)**,
 **Phase 3 (Persistent Queue Engine, Scheduler, Calendar, Priority System and Operational Workflow)**,
-**Phase 4 (Real Platform Authentication, Account Management, OAuth Lifecycle and Connector Foundation)**, and the
-backend of **Phase 5 (Real Publishing Engine, Resumable Uploads, Crash Recovery, Idempotency and Provider
-Execution)** — real uploads to YouTube, TikTok and Kwai, with no frontend built on top of it yet. It is a
-production-grade base for the full product, not a throwaway prototype — see [Current implementation status](#current-implementation-status)
-for exactly what is real versus what is intentionally deferred.
+**Phase 4 (Real Platform Authentication, Account Management, OAuth Lifecycle and Connector Foundation)**,
+**Phase 5 (Real Publishing Engine, Resumable Uploads, Crash Recovery, Idempotency and Provider Execution)**, and
+**Phase 5.1 (Publishing Completion, Metadata Resolution, Rate-Limit Integration and Full Frontend Operations)** —
+real uploads to YouTube, TikTok and Kwai, a real metadata-template precedence resolver, real provider rate-limit
+tracking, and a desktop UI a normal user can operate the publishing engine through end to end: inspect upcoming
+publications, review and override metadata, approve TikTok posts, publish immediately, watch live upload progress,
+inspect retries and attempts, and pause/resume publishing. It is a production-grade base for the full product, not
+a throwaway prototype — see [Current implementation status](#current-implementation-status) for exactly what is
+real versus what is intentionally deferred.
 
 ## Overview
 
@@ -236,9 +240,20 @@ Phase 5 turns Phase 3's scheduler and Phase 4's connected accounts into a real p
   restarted; real remote state is checked first, per provider, before anything is re-sent.
 - **TikTok's express-consent requirement** is a hard gate, keyed to the exact rendered metadata by content hash —
   an edit after approval means the old approval no longer covers it.
+- **A real metadata template precedence resolver** (Phase 5.1) — publication override → pinned template → channel
+  - platform → channel default → workspace + platform → workspace default → the publication's own raw fields,
+    documented in `docs/metadata-templates.md`. The exact same resolution powers both the live preview and what gets
+    frozen at execution time.
+- **Real provider rate-limit tracking** (Phase 5.1) — YouTube/TikTok/Kwai `Retry-After` headers are parsed for
+  real, the engine checks before ever dispatching to a provider, and a known window is never hit twice.
 - Commands to drive all of this: `publish_now`, `retry_publication`, `get_publication_attempts`,
-  `get_publication_readiness`, `record_publication_consent`.
-- **No frontend built on this yet** — see Current implementation status below.
+  `get_publication_readiness`, `record_publication_consent`, plus Phase 5.1's metadata, settings and rate-limit
+  command surface (`docs/publishing-ui.md`).
+- **A real desktop UI on top of it** (Phase 5.1) — Queue rows and Publication Details reflect live
+  `PublicationStatus` with real-time upload progress pushed over a Tauri event; TikTok approval requires reviewing
+  actual rendered content before confirming, with a bulk-approval flow too; Settings → Publishing exposes
+  enabled/paused state, upload concurrency and the missed-schedule policy; Channels/Integrations shows live
+  rate-limit state per account. See `docs/publishing-ui.md` for exactly what this pass covers and what it doesn't.
 
 ## Current implementation status
 
@@ -287,19 +302,27 @@ Phase 5 turns Phase 3's scheduler and Phase 4's connected accounts into a real p
 - Command palette, notification center, collapsible sidebar, dark theme (polished) / light theme (structural)
 
 **Deliberately not implemented yet** (see `docs/architecture.md`, `docs/scheduler.md`,
-`docs/platform-authentication.md` and `docs/publishing-engine.md` for what each needs before it can land):
+`docs/platform-authentication.md`, `docs/publishing-engine.md` and `docs/publishing-ui.md` for what each needs
+before it can land):
 
-- **No frontend for real publishing.** Phase 5's engine, uploaders and commands are real and tested, but no UI
-  consumes them yet — no live upload progress, no Publication Details attempt history, no metadata editor, no
-  Settings → Publishing screen, no TikTok consent-confirmation dialog. The Queue/Today/Dashboard/Activity screens
-  still reflect Phase 3/4 state only.
-- **No metadata template system.** `MetadataTemplate`/`HashtagSet` domain types and their repositories exist;
-  the precedence-resolution service (`MetadataTemplateService`) and CRUD commands don't. Publishing renders
-  metadata directly from a Publication's own fields today.
-- **No rate-limit-aware backoff.** `provider_rate_state` has a repository but nothing writes to it yet; a
-  provider's own rate-limit response is only ever handled as that one attempt's `RateLimited` error.
+- **No development-only "Simulation Mode" UI.** `FakePublisher` exists as a real backend seam for one; nothing in
+  the frontend toggles it on yet.
+- **The metadata editor is a single overrides panel**, not the full multi-tab per-provider (YouTube/TikTok/Kwai)
+  editor with a visible template-precedence selector. Template/hashtag-set CRUD exists under Settings →
+  Publishing, but scoped to the workspace only — assigning one to a specific channel or platform has no UI yet
+  (the backend already supports it).
+- **Today and Dashboard don't yet break "uploading" and "processing" into separate counters**, or surface a
+  distinct "needs verification" bucket the way Publication Details does — both already reflect real
+  `PublicationStatus` values, just not with Phase 5.1's full granularity.
+- **Activity doesn't log every Phase 5.1 event type** — some publishing transitions (rate-limited, retry
+  scheduled, consent recorded) don't have a dedicated activity-log entry yet, even though the feed itself already
+  shows real publishing events.
 - **No deliberate "repost" action** — the `execution_key` mechanism that would let one exist is in place, but
   nothing in the app currently mints a fresh one.
+- **`max_concurrent_uploads` takes effect on the next app restart, not live** — it sizes the upload semaphore once
+  at startup rather than being dynamically resizable.
+- No automated visual verification was performed for any of Phase 5.1's UI — see `docs/publishing-ui.md` for
+  exactly what that means.
 - Comments fetch/reply and full social analytics ingestion remain entirely out of scope, as before.
 - No live YouTube/TikTok/Kwai developer credentials were available while building Phase 4 or Phase 5 — every OAuth
   and publishing code path was verified against fakes/mocks (desktop) or `wiremock` (broker/uploaders), never a
