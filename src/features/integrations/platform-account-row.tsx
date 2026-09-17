@@ -1,10 +1,11 @@
-import { CheckCircle2, RefreshCw, Unlink, XCircle } from "lucide-react";
+import { CheckCircle2, Hourglass, RefreshCw, Unlink, XCircle } from "lucide-react";
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { PlatformBadge } from "@/components/ui/platform-badge";
 import { useDisconnectPlatformAccount, useValidatePlatformAccount } from "@/hooks/use-platform-auth";
+import { useProviderRateState } from "@/hooks/use-publishing";
 import { formatRelativeTime } from "@/lib/formatting/date";
 import { cn } from "@/lib/utilities/cn";
 import { confirmAction } from "@/stores/confirm-store";
@@ -36,6 +37,11 @@ export function PlatformAccountRow({ account, channelName, onReconnect }: Platfo
   const health = deriveConnectionHealth(account);
   const validate = useValidatePlatformAccount();
   const disconnect = useDisconnectPlatformAccount();
+  const rateState = useProviderRateState(account.id);
+  const activeLimit = rateState.data?.find(
+    (state) =>
+      state.operation === "publish" && state.limited_until && new Date(state.limited_until) > new Date(),
+  );
 
   async function handleDisconnect() {
     const confirmed = await confirmAction({
@@ -83,6 +89,16 @@ export function PlatformAccountRow({ account, channelName, onReconnect }: Platfo
           </span>
           {account.last_validated_at && <span>Checked {formatRelativeTime(account.last_validated_at)}</span>}
         </div>
+        {activeLimit && (
+          <div className="mt-1.5 flex items-center gap-1 text-caption normal-case tracking-normal text-warning">
+            <Hourglass className="size-3" />
+            Rate limited — retry available at{" "}
+            {new Date(activeLimit.limited_until!).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            })}
+          </div>
+        )}
         <div className="mt-1.5 flex flex-wrap gap-1">
           {account.capabilities.length === 0 && (
             <Badge variant="outline" className="px-1.5 py-0 text-[0.625rem]">
