@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Calendar, LayoutGrid, ListPlus, List, Rows3 } from "lucide-react";
+import { Calendar, LayoutGrid, ListPlus, List, Rows3, ShieldCheck } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
 import { PageContainer } from "@/components/common/page-container";
@@ -13,7 +13,9 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useChannels } from "@/hooks/use-channels";
 import { usePlatformAccountsForWorkspace } from "@/hooks/use-platform-accounts";
 import { useQueueList } from "@/hooks/use-queue";
+import { useRecordPublicationConsent } from "@/hooks/use-publishing";
 import { isFeatureEnabled } from "@/lib/utilities/feature-flags";
+import { toast } from "@/stores/toast-store";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import type { Publication } from "@/types/domain";
 import { deriveConnectionHealth } from "@/types/platform-auth";
@@ -21,6 +23,7 @@ import { deriveConnectionHealth } from "@/types/platform-auth";
 import { PublicationDetailsDrawer } from "./publication-details-drawer";
 import { QueueListView } from "./queue-list-view";
 import { QueueTimelineView } from "./queue-timeline-view";
+import { BulkTikTokApprovalDialog } from "./tiktok-consent-dialog";
 
 type QueueViewMode = "timeline" | "list";
 
@@ -65,6 +68,41 @@ export function QueuePage() {
   const channelNames = new Map(channels.map((c) => [c.id, c.name]));
   const publications: Publication[] = page?.items ?? [];
 
+  // Section 44/47: a heuristic candidate list, not a confirmed one —
+  // any TikTok publication about to become due, or already known to be
+  // blocked on consent specifically, may need approval. Approving one
+  // that already had valid consent is a harmless no-op (an extra audit
+  // row), so a false positive here costs nothing; a false negative would
+  // hide a real block, which this deliberately avoids by erring wide.
+  const tiktokNeedingApproval = publications.filter(
+    (p) =>
+      p.platform === "tiktok" &&
+      (p.status === "scheduled" || p.status === "queued" || p.last_error_code === "CONSENT_REQUIRED"),
+  );
+  const [bulkApprovalOpen, setBulkApprovalOpen] = useState(false);
+  const bulkConsent = useRecordPublicationConsent();
+
+  async function handleBulkApprove(selectedIds: string[]) {
+    let failures = 0;
+    for (const id of selectedIds) {
+      try {
+        await bulkConsent.mutateAsync({ id, source: "bulk_approval" });
+      } catch {
+        failures += 1;
+      }
+    }
+    setBulkApprovalOpen(false);
+    if (failures > 0) {
+      toast({
+        variant: "warning",
+        title: "Some approvals failed",
+        description: `${selectedIds.length - failures} of ${selectedIds.length} approved.`,
+      });
+    } else {
+      toast({ variant: "success", title: `${selectedIds.length} TikTok publications approved` });
+    }
+  }
+
   /** Section 72-76: informational only — a missing/unhealthy account never
    * removes or blocks a queued publication here, it only surfaces the
    * problem on the row via `QueueItemCard`'s tooltip. */
@@ -83,10 +121,18 @@ export function QueuePage() {
         title="Queue"
         description="Every publication scheduled to go out, across every channel and platform."
         actions={
-          <Button size="sm" onClick={() => navigate("/content")}>
-            <ListPlus />
-            Add to queue
-          </Button>
+          <div className="flex items-center gap-2">
+            {tiktokNeedingApproval.length > 0 && (
+              <Button size="sm" variant="outline" onClick={() => setBulkApprovalOpen(true)}>
+                <ShieldCheck className="size-3.5" />
+                {tiktokNeedingApproval.length} TikTok approvals
+              </Button>
+            )}
+            <Button size="sm" onClick={() => navigate("/content")}>
+              <ListPlus />
+              Add to queue
+            </Button>
+          </div>
         }
       />
 
@@ -179,6 +225,15 @@ export function QueuePage() {
         ))}
 
       <PublicationDetailsDrawer publicationId={selectedId} onClose={() => setSelectedId(null)} />
+
+      <BulkTikTokApprovalDialog
+        publications={tiktokNeedingApproval}
+        open={bulkApprovalOpen}
+        onOpenChange={setBulkApprovalOpen}
+        onApprove={handleBulkApprove}
+        isApproving={bulkConsent.isPending}
+        channelNames={channelNames}
+      />
     </PageContainer>
   );
 }

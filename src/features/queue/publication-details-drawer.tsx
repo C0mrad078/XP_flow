@@ -37,6 +37,7 @@ import {
   useUpdatePublicationMetadata,
 } from "@/hooks/use-publishing";
 import { usePublicationProgress } from "@/hooks/use-publish-progress";
+import { TikTokConsentDialog } from "@/features/queue/tiktok-consent-dialog";
 import {
   isAppError,
   isPublicationOverdue,
@@ -89,6 +90,7 @@ function DetailBody({ publication, onClose }: { publication: Publication; onClos
   const updateMetadata = useUpdatePublicationMetadata();
 
   const [draftAt, setDraftAt] = useState("");
+  const [consentDialogOpen, setConsentDialogOpen] = useState(false);
   const [metadataDraft, setMetadataDraft] = useState<{
     title: string;
     description: string;
@@ -316,17 +318,27 @@ function DetailBody({ publication, onClose }: { publication: Publication; onClos
           </Button>
         )}
         {needsConsent && (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => consent.mutate({ id: publication.id })}
-            disabled={consent.isPending}
-          >
+          <Button size="sm" variant="outline" onClick={() => setConsentDialogOpen(true)}>
             <ShieldCheck className="size-3.5" />
             Approve TikTok
           </Button>
         )}
       </div>
+
+      {needsConsent && (
+        <TikTokConsentDialog
+          publication={publication}
+          open={consentDialogOpen}
+          onOpenChange={setConsentDialogOpen}
+          isApproving={consent.isPending}
+          onApprove={() =>
+            consent.mutate(
+              { id: publication.id, source: "manual_schedule" },
+              { onSuccess: () => setConsentDialogOpen(false) },
+            )
+          }
+        />
+      )}
 
       {metadata.data && (
         <div className="rounded-md border border-border bg-surface-elevated p-3">
