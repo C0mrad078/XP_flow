@@ -21,6 +21,7 @@ function samplePublication(overrides: Partial<Publication> = {}): Publication {
     remote_id: null,
     retry_count: 0,
     last_error: null,
+    last_error_code: null,
     created_at: "2024-01-01T00:00:00Z",
     updated_at: "2024-01-01T00:00:00Z",
     ...overrides,

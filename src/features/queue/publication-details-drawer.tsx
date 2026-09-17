@@ -36,7 +36,12 @@ import {
   useRetryPublication,
   useUpdatePublicationMetadata,
 } from "@/hooks/use-publishing";
-import { isAppError, isPublicationOverdue, type Publication } from "@/types/domain";
+import {
+  isAppError,
+  isPublicationOverdue,
+  UNKNOWN_REMOTE_RESULT_CODE,
+  type Publication,
+} from "@/types/domain";
 import { VIDEO_PRIORITIES, VIDEO_PRIORITY_LABELS, type VideoPriority } from "@/types/media";
 
 export interface PublicationDetailsDrawerProps {
@@ -139,7 +144,12 @@ function DetailBody({ publication, onClose }: { publication: Publication; onClos
   );
   const canRetry = publication.status === "failed" || publication.status === "rate_limited";
   const needsConsent = readiness.data?.includes("consent_required");
-  const needsVerification = publication.status === "blocked";
+  // Section 66/67: this is the one case a plain "Retry" must never be
+  // offered — the remote outcome is genuinely unknown, and retrying
+  // blind is exactly how a duplicate post gets created. Keyed off the
+  // stable error code, never status (no PublicationStatus value is ever
+  // set specifically for this) or last_error's free text.
+  const needsVerification = publication.last_error_code === UNKNOWN_REMOTE_RESULT_CODE;
   const latestAttempt = attempts.data?.[attempts.data.length - 1];
   const progress =
     latestAttempt?.bytes_total && latestAttempt.bytes_total > 0

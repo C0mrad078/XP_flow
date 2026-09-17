@@ -65,9 +65,18 @@ export interface Publication {
   remote_id: string | null;
   retry_count: number;
   last_error: string | null;
+  /** Stable `PublishError::code()` behind `last_error`, when it came from
+   * a typed error — check this (never `last_error`'s prose) to detect
+   * "UNKNOWN_REMOTE_RESULT" and refuse blind retry for it. */
+  last_error_code: string | null;
   created_at: ISODateTime;
   updated_at: ISODateTime;
 }
+
+/** The one error code that must never be offered a plain "Retry" action
+ * — an ambiguous remote outcome that was never resolved automatically to
+ * protect against creating a duplicate post (see docs/publishing-ui.md). */
+export const UNKNOWN_REMOTE_RESULT_CODE = "UNKNOWN_REMOTE_RESULT";
 
 /** Derived (never persisted) — a Scheduled publication whose scheduled_at
  * has already passed. Mirrors `Publication::is_overdue` in Rust. */

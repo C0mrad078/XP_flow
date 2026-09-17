@@ -36,6 +36,7 @@ function calendarItem(overrides: Partial<CalendarPublication["publication"]> = {
       remote_id: null,
       retry_count: 0,
       last_error: null,
+      last_error_code: null,
       created_at: "2024-06-01T00:00:00Z",
       updated_at: "2024-06-01T00:00:00Z",
       ...overrides,
