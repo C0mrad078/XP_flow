@@ -15,10 +15,11 @@ import { ManageAccountSheet } from "@/features/integrations/manage-account-sheet
 import { ProviderCard } from "@/features/integrations/provider-card";
 import { useChannels } from "@/hooks/use-channels";
 import { usePlatformAccountsForWorkspace } from "@/hooks/use-platform-accounts";
-import { useConnectFlow } from "@/hooks/use-platform-auth";
+import { useConnectFlow, useProviderConfigurationHealth } from "@/hooks/use-platform-auth";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import { PLATFORMS, PLATFORM_LABELS, type Platform } from "@/types/domain";
 import type { PlatformAccount } from "@/types/platform-auth";
+import type { ProviderConfigurationHealth } from "@/types/provider-configuration-health";
 
 /**
  * Section 47-51's real Settings → Integrations screen: one card per
@@ -32,6 +33,17 @@ export function IntegrationsSection() {
   const { data: accounts = [] } = usePlatformAccountsForWorkspace();
   const { data: channels = [] } = useChannels();
   const connectFlow = useConnectFlow();
+  const {
+    data: health,
+    isLoading: healthLoading,
+    isError: healthQueryFailed,
+    refetch: refetchHealth,
+  } = useProviderConfigurationHealth();
+  const healthByPlatform = useMemo(() => {
+    const map = new Map<Platform, ProviderConfigurationHealth>();
+    for (const entry of health ?? []) map.set(entry.platform, entry);
+    return map;
+  }, [health]);
 
   const [pendingPlatform, setPendingPlatform] = useState<Platform | null>(null);
   const [pendingChannelId, setPendingChannelId] = useState<string | null>(null);
@@ -54,17 +66,30 @@ export function IntegrationsSection() {
 
   return (
     <div className="flex flex-col gap-4">
+      {healthQueryFailed && (
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-danger/20 bg-danger/10 p-3 text-body-small text-danger">
+          <span>Unable to check provider configuration.</span>
+          <Button size="sm" variant="outline" onClick={() => void refetchHealth()}>
+            Try Again
+          </Button>
+        </div>
+      )}
+
       {PLATFORMS.map((platform) => (
         <ProviderCard
           key={platform}
           platform={platform}
           accounts={accountsByPlatform.get(platform) ?? []}
           channelsById={channelsById}
+          health={healthByPlatform.get(platform)}
+          healthLoading={healthLoading}
+          healthQueryFailed={healthQueryFailed}
           onConnect={(p) => {
             setPendingPlatform(p);
             setPendingChannelId(channels[0]?.id ?? null);
           }}
           onManage={setManageAccount}
+          onRetryHealth={() => void refetchHealth()}
         />
       ))}
 
@@ -74,18 +99,24 @@ export function IntegrationsSection() {
             <DialogTitle>Connect {pendingPlatform && PLATFORM_LABELS[pendingPlatform]}</DialogTitle>
             <DialogDescription>Which channel should this account be attached to?</DialogDescription>
           </DialogHeader>
-          <Select value={pendingChannelId ?? ""} onValueChange={setPendingChannelId}>
-            <SelectTrigger className="w-full">
-              <SelectValue placeholder="Choose a channel" />
-            </SelectTrigger>
-            <SelectContent>
-              {channels.map((channel) => (
-                <SelectItem key={channel.id} value={channel.id}>
-                  {channel.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          {channels.length === 0 ? (
+            <p className="text-body-small text-muted-foreground">
+              You don't have any channels yet. Create a channel first, then connect an account to it.
+            </p>
+          ) : (
+            <Select value={pendingChannelId ?? ""} onValueChange={setPendingChannelId}>
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="Choose a channel" />
+              </SelectTrigger>
+              <SelectContent>
+                {channels.map((channel) => (
+                  <SelectItem key={channel.id} value={channel.id}>
+                    {channel.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setPendingPlatform(null)}>
               Cancel

@@ -1,9 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { platformAuthApi } from "@/lib/tauri";
 import type { Platform, UUID } from "@/types/domain";
 import type { AuthFlowState } from "@/types/platform-auth";
+
+/**
+ * The single backend-authoritative source every Connect Account surface
+ * reads (never independently re-derived per component — see
+ * `ProviderConfigurationHealth`'s doc comment). Re-fetched on window
+ * focus and on manual retry since broker reachability can change while
+ * the dialog is open; not polled continuously, since this is a
+ * connect-readiness check, not a live status stream.
+ */
+export function useProviderConfigurationHealth() {
+  return useQuery({
+    queryKey: ["provider-configuration-health"],
+    queryFn: () => platformAuthApi.getConfigurationHealth(),
+    staleTime: 30_000,
+  });
+}
 
 /** Section 79: bounded polling only while an authorization dialog is
  * actually open — never a global "poll every account forever" loop. */
