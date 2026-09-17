@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { CheckCircle2, Lock, RefreshCcw, Send, ShieldCheck, Unlock } from "lucide-react";
+import { CheckCircle2, ClipboardCopy, Lock, RefreshCcw, Send, ShieldCheck, Unlock } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -138,6 +138,28 @@ function DetailBody({ publication, onClose }: { publication: Publication; onClos
           description: isAppError(error) ? error.user_message : undefined,
         }),
     });
+  }
+
+  /** Section 65 — a plain, non-secret publishing snapshot for a support
+   * request. `remote_operation_id` is the provider's own post/video id
+   * (safe — it's what a support agent needs to look the post up), never
+   * an access token, upload URL/token or authorization header. */
+  async function handleCopyDiagnostics() {
+    const attemptsList = attempts.data ?? [];
+    const latest = attemptsList[attemptsList.length - 1];
+    const diagnostics = {
+      publication_id: publication.id,
+      attempt_id: latest?.id ?? null,
+      platform: publication.platform,
+      status: publication.status,
+      remote_state: latest?.status ?? null,
+      remote_operation_id: latest?.remote_operation_id ?? publication.remote_id,
+      error_code: publication.last_error_code,
+      rate_limit: rateState.data?.filter((state) => state.limited_until) ?? [],
+      readiness_reasons: readiness.data ?? [],
+    };
+    await navigator.clipboard.writeText(JSON.stringify(diagnostics, null, 2));
+    toast({ variant: "success", title: "Diagnostics copied" });
   }
 
   const canSchedule = publication.status === "queued" || publication.status === "scheduled";
@@ -473,6 +495,10 @@ function DetailBody({ publication, onClose }: { publication: Publication; onClos
             Archive
           </Button>
         )}
+        <Button variant="ghost" size="sm" onClick={handleCopyDiagnostics}>
+          <ClipboardCopy className="size-3.5" />
+          Copy diagnostics
+        </Button>
       </div>
     </div>
   );
