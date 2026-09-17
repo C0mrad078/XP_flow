@@ -99,6 +99,7 @@ fn row_to_publication(row: &sqlx::sqlite::SqliteRow) -> Result<Publication, Doma
         remote_id: row.try_get("remote_id").map_err(map_repo_err)?,
         retry_count: row.try_get("retry_count").map_err(map_repo_err)?,
         last_error: row.try_get("last_error").map_err(map_repo_err)?,
+        last_error_code: row.try_get("last_error_code").map_err(map_repo_err)?,
         execution_key: execution_key.and_then(|s| Uuid::parse_str(&s).ok()),
         claim_token: row.try_get("claim_token").map_err(map_repo_err)?,
         lease_expires_at: lease_expires_at.map(|s| parse_dt(&s)),
@@ -117,9 +118,9 @@ fn row_to_publication(row: &sqlx::sqlite::SqliteRow) -> Result<Publication, Doma
 
 const SELECT_COLUMNS: &str = "id, workspace_id, video_id, channel_id, platform_account_id, platform, status, title, \
      description, hashtags_json, priority, locked, scheduled_at, published_at, remote_id, retry_count, last_error, \
-     execution_key, claim_token, lease_expires_at, rendered_metadata_json, title_override, description_override, \
-     hashtags_override, title_template_id, description_template_id, hashtag_set_id, provider_options_override, \
-     created_at, updated_at";
+     last_error_code, execution_key, claim_token, lease_expires_at, rendered_metadata_json, title_override, \
+     description_override, hashtags_override, title_template_id, description_template_id, hashtag_set_id, \
+     provider_options_override, created_at, updated_at";
 
 #[async_trait]
 impl PublicationRepository for SqlitePublicationRepository {
@@ -127,10 +128,10 @@ impl PublicationRepository for SqlitePublicationRepository {
         sqlx::query(
             "INSERT INTO publications (id, workspace_id, video_id, channel_id, platform_account_id, platform, status, title, \
              description, hashtags_json, priority, locked, scheduled_at, published_at, remote_id, retry_count, last_error, \
-             execution_key, claim_token, lease_expires_at, rendered_metadata_json, title_override, description_override, \
-             hashtags_override, title_template_id, description_template_id, hashtag_set_id, provider_options_override, \
-             created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             last_error_code, execution_key, claim_token, lease_expires_at, rendered_metadata_json, title_override, \
+             description_override, hashtags_override, title_template_id, description_template_id, hashtag_set_id, \
+             provider_options_override, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(publication.id.to_string())
         .bind(publication.workspace_id.to_string())
@@ -149,6 +150,7 @@ impl PublicationRepository for SqlitePublicationRepository {
         .bind(&publication.remote_id)
         .bind(publication.retry_count)
         .bind(&publication.last_error)
+        .bind(&publication.last_error_code)
         .bind(publication.execution_key.map(|id| id.to_string()))
         .bind(&publication.claim_token)
         .bind(publication.lease_expires_at.map(|dt| dt.to_rfc3339()))
@@ -228,8 +230,8 @@ impl PublicationRepository for SqlitePublicationRepository {
         let result = sqlx::query(
             "UPDATE publications SET platform_account_id = ?, status = ?, title = ?, description = ?, hashtags_json = ?, \
              priority = ?, locked = ?, scheduled_at = ?, published_at = ?, remote_id = ?, retry_count = ?, last_error = ?, \
-             title_override = ?, description_override = ?, hashtags_override = ?, title_template_id = ?, \
-             description_template_id = ?, hashtag_set_id = ?, provider_options_override = ?, \
+             last_error_code = ?, title_override = ?, description_override = ?, hashtags_override = ?, \
+             title_template_id = ?, description_template_id = ?, hashtag_set_id = ?, provider_options_override = ?, \
              updated_at = ? \
              WHERE id = ? AND status NOT IN ('uploading', 'processing')",
         )
@@ -245,6 +247,7 @@ impl PublicationRepository for SqlitePublicationRepository {
         .bind(&publication.remote_id)
         .bind(publication.retry_count)
         .bind(&publication.last_error)
+        .bind(&publication.last_error_code)
         .bind(&publication.metadata_overrides.title_override)
         .bind(&publication.metadata_overrides.description_override)
         .bind(
@@ -314,7 +317,7 @@ impl PublicationRepository for SqlitePublicationRepository {
                 )
             };
         let result = sqlx::query(
-            "UPDATE publications SET status = ?, remote_id = ?, retry_count = ?, last_error = ?, \
+            "UPDATE publications SET status = ?, remote_id = ?, retry_count = ?, last_error = ?, last_error_code = ?, \
              rendered_metadata_json = COALESCE(?, rendered_metadata_json), claim_token = ?, lease_expires_at = ?, published_at = COALESCE(?, published_at), updated_at = ? \
              WHERE id = ? AND claim_token = ?",
         )
@@ -322,6 +325,7 @@ impl PublicationRepository for SqlitePublicationRepository {
         .bind(&update.remote_id)
         .bind(update.retry_count)
         .bind(&update.last_error)
+        .bind(&update.last_error_code)
         .bind(&update.rendered_metadata_json)
         .bind(new_claim_token)
         .bind(new_lease_expires_at)
@@ -341,16 +345,18 @@ impl PublicationRepository for SqlitePublicationRepository {
         status: PublicationStatus,
         remote_id: Option<String>,
         last_error: Option<String>,
+        last_error_code: Option<String>,
         published_at: Option<DateTime<Utc>>,
     ) -> DomainResult<bool> {
         let result = sqlx::query(
             "UPDATE publications SET status = ?, remote_id = COALESCE(?, remote_id), last_error = ?, \
-             published_at = COALESCE(?, published_at), claim_token = NULL, lease_expires_at = NULL, updated_at = ? \
+             last_error_code = ?, published_at = COALESCE(?, published_at), claim_token = NULL, lease_expires_at = NULL, updated_at = ? \
              WHERE id = ? AND status = 'processing'",
         )
         .bind(status.as_str())
         .bind(remote_id)
         .bind(last_error)
+        .bind(last_error_code)
         .bind(published_at.map(|dt| dt.to_rfc3339()))
         .bind(Utc::now().to_rfc3339())
         .bind(id.to_string())
@@ -373,7 +379,8 @@ impl PublicationRepository for SqlitePublicationRepository {
             // Engine currently owns back to a pre-claim status.
             let result = sqlx::query(
                 "UPDATE publications SET platform_account_id = ?, status = ?, title = ?, description = ?, hashtags_json = ?, \
-                 priority = ?, locked = ?, scheduled_at = ?, published_at = ?, remote_id = ?, retry_count = ?, last_error = ?, updated_at = ? \
+                 priority = ?, locked = ?, scheduled_at = ?, published_at = ?, remote_id = ?, retry_count = ?, last_error = ?, \
+                 last_error_code = ?, updated_at = ? \
                  WHERE id = ? AND status NOT IN ('uploading', 'processing')",
             )
             .bind(publication.platform_account_id.map(|id| id.to_string()))
@@ -388,6 +395,7 @@ impl PublicationRepository for SqlitePublicationRepository {
             .bind(&publication.remote_id)
             .bind(publication.retry_count)
             .bind(&publication.last_error)
+            .bind(&publication.last_error_code)
             .bind(publication.updated_at.to_rfc3339())
             .bind(publication.id.to_string())
             .execute(&mut *tx)
@@ -847,6 +855,7 @@ mod tests {
                 remote_id: None,
                 retry_count: 1,
                 last_error: Some("network error".to_string()),
+                last_error_code: None,
                 rendered_metadata_json: None,
                 release_claim: true,
                 new_lease_expires_at: None,
@@ -942,6 +951,7 @@ mod tests {
             remote_id: Some("remote-1".to_string()),
             retry_count: 0,
             last_error: None,
+            last_error_code: None,
             rendered_metadata_json: None,
             release_claim: false,
             new_lease_expires_at: Some(Utc::now() + chrono::Duration::minutes(45)),
@@ -1031,6 +1041,7 @@ mod tests {
                 PublicationStatus::Published,
                 None,
                 None,
+                None,
                 Some(Utc::now()),
             )
             .await
@@ -1054,6 +1065,7 @@ mod tests {
                 remote_id: Some("remote-processing-1".to_string()),
                 retry_count: 0,
                 last_error: None,
+                last_error_code: None,
                 rendered_metadata_json: None,
                 release_claim: true,
                 new_lease_expires_at: None,
@@ -1070,6 +1082,7 @@ mod tests {
                 PublicationStatus::Published,
                 None,
                 None,
+                None,
                 Some(now),
             )
             .await
@@ -1082,7 +1095,14 @@ mod tests {
 
         // A second, redundant poll result must be a harmless no-op.
         let second = repo
-            .try_finish_processing(publication.id, PublicationStatus::Failed, None, None, None)
+            .try_finish_processing(
+                publication.id,
+                PublicationStatus::Failed,
+                None,
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert!(!second);

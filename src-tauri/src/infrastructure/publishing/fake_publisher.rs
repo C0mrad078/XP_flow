@@ -39,6 +39,14 @@ pub enum FakeScenario {
     /// `get_remote_status` only reports `RemoteSucceeded` after being
     /// called `processing_polls_until_done` times.
     NeedsProcessing { polls_until_done: u32 },
+    /// Simulates a crash whose recovery check is itself inconclusive —
+    /// `recover_upload` always returns `PublishError::UnknownRemoteResult`,
+    /// the way a real provider's status endpoint failing (or returning
+    /// something unparseable) at exactly the wrong moment would. Exists
+    /// to test that this genuinely-ambiguous case is never silently
+    /// retried (section 3/69 — the failure mode this whole crash-
+    /// recovery design exists to prevent).
+    AmbiguousAfterCrash,
 }
 
 struct FakeState {
@@ -199,6 +207,12 @@ impl PlatformPublisher for FakePublisher {
     ) -> Result<UploadSession, PublishError> {
         if session.state.safe_to_restart() {
             return Ok(session);
+        }
+        if matches!(
+            self.state.lock().unwrap().scenario,
+            FakeScenario::AmbiguousAfterCrash
+        ) {
+            return Err(PublishError::UnknownRemoteResult);
         }
         // Simulates verifying with the provider and finding the transfer
         // can resume from the committed byte count — a real provider's

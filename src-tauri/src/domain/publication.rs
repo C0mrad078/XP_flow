@@ -192,6 +192,9 @@ pub struct Publication {
     pub remote_id: Option<String>,
     pub retry_count: i32,
     pub last_error: Option<String>,
+    /// The stable `PublishError::code()` behind `last_error`, when it
+    /// came from a typed error — see `ExecutionStateUpdate::last_error_code`.
+    pub last_error_code: Option<String>,
     /// Section 67 — the identity a retry reuses across attempts; a
     /// deliberate user-initiated repost gets a *new* execution key
     /// instead (section 3), so "same execution key" is exactly XP FLOW's
@@ -244,6 +247,7 @@ impl Publication {
             remote_id: None,
             retry_count: 0,
             last_error: None,
+            last_error_code: None,
             execution_key: None,
             claim_token: None,
             lease_expires_at: None,

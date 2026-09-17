@@ -152,6 +152,12 @@ pub struct ExecutionStateUpdate {
     pub remote_id: Option<String>,
     pub retry_count: i32,
     pub last_error: Option<String>,
+    /// The stable `PublishError::code()` behind `last_error`, when it
+    /// came from a typed error (`None` otherwise) — section 66/67: the
+    /// frontend needs a stable signal to detect `UNKNOWN_REMOTE_RESULT`
+    /// specifically (never offer blind retry for it), which free-text
+    /// `last_error` alone can't reliably provide.
+    pub last_error_code: Option<String>,
     pub rendered_metadata_json: Option<String>,
     pub release_claim: bool,
     pub new_lease_expires_at: Option<DateTime<Utc>>,
@@ -209,6 +215,7 @@ pub trait PublicationRepository: Send + Sync {
         status: crate::domain::publication::PublicationStatus,
         remote_id: Option<String>,
         last_error: Option<String>,
+        last_error_code: Option<String>,
         published_at: Option<DateTime<Utc>>,
     ) -> DomainResult<bool>;
     /// Persists every publication in `publications` inside a single

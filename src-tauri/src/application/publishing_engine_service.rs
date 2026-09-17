@@ -702,6 +702,7 @@ impl PublishingEngineService {
                             remote_id: session.remote_publish_id.clone(),
                             retry_count: publication.retry_count,
                             last_error: None,
+                            last_error_code: None,
                             rendered_metadata_json: None,
                             release_claim: true,
                             new_lease_expires_at: None,
@@ -730,6 +731,7 @@ impl PublishingEngineService {
                             remote_id: session.remote_publish_id.clone(),
                             retry_count: publication.retry_count,
                             last_error: None,
+                            last_error_code: None,
                             rendered_metadata_json: None,
                             release_claim: true,
                             new_lease_expires_at: None,
@@ -854,6 +856,7 @@ impl PublishingEngineService {
                         PublicationStatus::Published,
                         session.remote_publish_id.clone(),
                         None,
+                        None,
                         Some(Utc::now()),
                     )
                     .await
@@ -863,17 +866,16 @@ impl PublishingEngineService {
                 self.log_success(&publication).await;
             }
             RemoteUploadState::RemoteFailed => {
+                let remote_processing_failed = PublishError::RemoteProcessingFailed {
+                    detail: "the platform failed to process the upload".to_string(),
+                };
                 self.publication_repo
                     .try_finish_processing(
                         publication_id,
                         PublicationStatus::Failed,
                         None,
-                        Some(
-                            PublishError::RemoteProcessingFailed {
-                                detail: "the platform failed to process the upload".to_string(),
-                            }
-                            .user_message(),
-                        ),
+                        Some(remote_processing_failed.user_message()),
+                        Some(remote_processing_failed.code().to_string()),
                         None,
                     )
                     .await
@@ -935,6 +937,7 @@ impl PublishingEngineService {
                         remote_id: None,
                         retry_count: publication.retry_count,
                         last_error: Some("interrupted before any data was sent".to_string()),
+                        last_error_code: None,
                         rendered_metadata_json: None,
                         release_claim: true,
                         new_lease_expires_at: None,
@@ -988,6 +991,7 @@ impl PublishingEngineService {
                                     remote_id: recovered.remote_publish_id.clone(),
                                     retry_count: publication.retry_count,
                                     last_error: None,
+                                    last_error_code: None,
                                     rendered_metadata_json: None,
                                     release_claim: true,
                                     new_lease_expires_at: None,
@@ -1008,6 +1012,7 @@ impl PublishingEngineService {
                                     remote_id: recovered.remote_publish_id.clone(),
                                     retry_count: publication.retry_count,
                                     last_error: None,
+                                    last_error_code: None,
                                     rendered_metadata_json: None,
                                     release_claim: true,
                                     new_lease_expires_at: None,
@@ -1029,6 +1034,7 @@ impl PublishingEngineService {
                                     last_error: Some(
                                         "recovery reported a failed remote result".to_string(),
                                     ),
+                                    last_error_code: None,
                                     rendered_metadata_json: None,
                                     release_claim: true,
                                     new_lease_expires_at: None,
@@ -1058,6 +1064,9 @@ impl PublishingEngineService {
                             remote_id: None,
                             retry_count: publication.retry_count,
                             last_error: Some(PublishError::UnknownRemoteResult.user_message()),
+                            last_error_code: Some(
+                                PublishError::UnknownRemoteResult.code().to_string(),
+                            ),
                             rendered_metadata_json: None,
                             release_claim: true,
                             new_lease_expires_at: None,
@@ -1086,6 +1095,7 @@ impl PublishingEngineService {
                         remote_id: None,
                         retry_count: 0,
                         last_error: None,
+                        last_error_code: None,
                         rendered_metadata_json: Some(json),
                         release_claim: false,
                         new_lease_expires_at: Some(Utc::now() + CLAIM_LEASE_DURATION),
@@ -1146,6 +1156,7 @@ impl PublishingEngineService {
                     remote_id: None,
                     retry_count: publication.retry_count + 1,
                     last_error: Some(err.user_message()),
+                    last_error_code: Some(err.code().to_string()),
                     rendered_metadata_json: None,
                     release_claim: true,
                     new_lease_expires_at: None,
@@ -2139,5 +2150,78 @@ mod tests {
             .unwrap();
         assert_eq!(updated.status, PublicationStatus::Cancelled);
         assert!(updated.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_recovery_result_fails_closed_with_a_stable_error_code_never_auto_retried()
+    {
+        let fixture = build_fixture(FakeScenario::AmbiguousAfterCrash).await;
+        let pool = fixture.pool.clone();
+        let publication_id = seed_ready_publication(
+            &pool,
+            fixture.workspace_id,
+            fixture.channel_id,
+            fixture.source_id,
+        )
+        .await;
+
+        // Claim it with an already-expired lease, as if the process died
+        // mid-upload, and leave a session in a not-safe-to-restart state
+        // — exactly the precondition `recover_one` inspects.
+        let claim_token = "expired-claim".to_string();
+        let claimed = fixture
+            .publication_repo
+            .try_claim_due(
+                publication_id,
+                Uuid::new_v4(),
+                &claim_token,
+                Utc::now() - Duration::minutes(1),
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+        assert!(claimed, "the setup claim must actually succeed");
+        let attempt =
+            crate::domain::publishing::PublicationAttempt::new(publication_id, 1, Platform::TikTok);
+        fixture.attempt_repo.create(&attempt).await.unwrap();
+        let mut session = crate::domain::publishing::UploadSession::new(
+            publication_id,
+            attempt.id,
+            Platform::TikTok,
+            crate::domain::publishing::SessionType::DirectPost,
+        );
+        session.state = crate::domain::publishing::RemoteUploadState::Transferring;
+        session.bytes_committed = 5;
+        fixture.session_repo.create(&session).await.unwrap();
+
+        fixture
+            .engine
+            .recover_interrupted(fixture.workspace_id)
+            .await;
+
+        let updated = fixture
+            .publication_repo
+            .get(publication_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            updated.status,
+            PublicationStatus::Failed,
+            "an ambiguous recovery must fail closed, not silently succeed or restart"
+        );
+        assert_eq!(
+            updated.last_error_code.as_deref(),
+            Some("UNKNOWN_REMOTE_RESULT"),
+            "the frontend needs this stable code to refuse blind retry — free-text alone isn't enough"
+        );
+        assert!(
+            updated.claim_token.is_none(),
+            "the claim must still be released so it doesn't look abandoned forever"
+        );
+        // Section 69: this must NOT have been silently requeued for
+        // automatic retry — it stays exactly where a human left it,
+        // still Failed, not bounced back to Scheduled.
+        assert!(updated.scheduled_at.is_none() || updated.status == PublicationStatus::Failed);
     }
 }
