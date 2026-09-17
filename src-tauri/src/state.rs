@@ -6,6 +6,7 @@ use crate::application::content_service::ContentService;
 use crate::application::metadata_template_service::MetadataTemplateService;
 use crate::application::platform_account_service::PlatformAccountService;
 use crate::application::platform_auth_service::PlatformAuthService;
+use crate::application::provider_configuration_health_service::ProviderConfigurationHealthService;
 use crate::application::provider_rate_limit_service::ProviderRateLimitService;
 use crate::application::publication_service::PublicationService;
 use crate::application::publishing_engine_service::PublishingEngineService;
@@ -50,6 +51,7 @@ pub struct AppState {
     pub publishing_engine_service: Arc<PublishingEngineService>,
     pub metadata_template_service: Arc<MetadataTemplateService>,
     pub provider_rate_limit_service: Arc<ProviderRateLimitService>,
+    pub provider_configuration_health_service: Arc<ProviderConfigurationHealthService>,
     pub publishing_readiness_service: Arc<PublishingReadinessService>,
     pub job_runner: Arc<JobRunner>,
     pub video_repo: Arc<dyn VideoRepository>,

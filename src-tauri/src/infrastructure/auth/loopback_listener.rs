@@ -118,10 +118,26 @@ impl LoopbackListener {
 
 type SenderSlot = std::sync::Arc<tokio::sync::Mutex<Option<oneshot::Sender<CallbackParams>>>>;
 
+const SUCCESS_PAGE: &str =
+    "<html><body style=\"font-family:sans-serif;text-align:center;padding-top:4rem\">\
+     <h2>XP FLOW</h2><p>Account connected successfully.</p><p>You can return to XP FLOW.</p>\
+     </body></html>";
+
+const ERROR_PAGE: &str =
+    "<html><body style=\"font-family:sans-serif;text-align:center;padding-top:4rem\">\
+     <h2>XP FLOW</h2><p>XP FLOW could not connect your account.</p>\
+     <p>You can close this window and return to XP FLOW.</p>\
+     </body></html>";
+
+/// Never echoes the raw callback back to the browser (section 19/20: no
+/// authorization code, token or internal state in the page a stranger
+/// glancing at the user's screen could see) — the page only ever says
+/// "success" or "not success," in general terms.
 async fn handle_callback(
     State(sender): State<SenderSlot>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Html<&'static str> {
+    let succeeded = params.contains_key("code") && !params.contains_key("error");
     let callback = CallbackParams {
         code: params.get("code").cloned(),
         state: params.get("state").cloned(),
@@ -130,9 +146,5 @@ async fn handle_callback(
     if let Some(tx) = sender.lock().await.take() {
         let _ = tx.send(callback);
     }
-    Html(
-        "<html><body style=\"font-family:sans-serif;text-align:center;padding-top:4rem\">\
-         <h2>You can close this window</h2><p>XP FLOW is finishing the connection.</p>\
-         </body></html>",
-    )
+    Html(if succeeded { SUCCESS_PAGE } else { ERROR_PAGE })
 }

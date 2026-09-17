@@ -22,6 +22,7 @@ use application::media_ingestion_service::MediaIngestionService;
 use application::metadata_template_service::MetadataTemplateService;
 use application::platform_account_service::PlatformAccountService;
 use application::platform_auth_service::PlatformAuthService;
+use application::provider_configuration_health_service::ProviderConfigurationHealthService;
 use application::provider_rate_limit_service::ProviderRateLimitService;
 use application::publication_service::PublicationService;
 use application::publishing_engine_service::PublishingEngineService;
@@ -214,6 +215,7 @@ pub fn run() {
             commands::platform_account_commands::list_platform_accounts_for_workspace,
             commands::platform_account_commands::set_default_platform_account,
             commands::platform_account_commands::reassign_platform_account_channel,
+            commands::platform_auth_commands::get_provider_configuration_health,
             commands::platform_auth_commands::begin_platform_connect,
             commands::platform_auth_commands::begin_platform_reconnect,
             commands::platform_auth_commands::poll_platform_connect_status,
@@ -349,53 +351,29 @@ async fn bootstrap(
     let broker_client =
         broker_client.filter(|_| broker_config.as_ref().is_some_and(|c| c.is_secure_enough()));
 
+    // YouTube ships with a built-in OAuth client id (`YouTubeAuthConfig`)
+    // and therefore never has a "not configured" state — it always gets
+    // the real provider/connector, never a `Stub*`.
     let youtube_config = YouTubeAuthConfig::resolve();
     let tiktok_config = TikTokAuthConfig::resolve();
     let kwai_publish_config = KwaiPublishConfig::resolve();
-    // `youtube_config` is consumed (by value) in the match below;
-    // captured here so the publisher-wiring section further down still
-    // knows whether a real `YouTubeUploader` can be registered.
-    let youtube_configured = youtube_config.is_some();
 
     let mut auth_providers: std::collections::HashMap<Platform, Arc<dyn PlatformAuthProvider>> =
         std::collections::HashMap::new();
     let mut connectors: std::collections::HashMap<Platform, Arc<dyn PlatformConnector>> =
         std::collections::HashMap::new();
 
-    match youtube_config {
-        Some(config) => {
-            auth_providers.insert(
-                Platform::YouTube,
-                Arc::new(YouTubeAuthProvider::new(config.clone())),
-            );
-            connectors.insert(
-                Platform::YouTube,
-                Arc::new(YouTubeConnector::new(
-                    YouTubeApiClient::new(config),
-                    secure_storage.clone(),
-                )),
-            );
-        }
-        None => {
-            tracing::warn!(
-                "YOUTUBE_CLIENT_ID not set — YouTube connections are unavailable in this build"
-            );
-            auth_providers.insert(
-                Platform::YouTube,
-                Arc::new(StubAuthProvider::new(
-                    Platform::YouTube,
-                    "YOUTUBE_CLIENT_ID is not configured",
-                )),
-            );
-            connectors.insert(
-                Platform::YouTube,
-                Arc::new(StubConnector::new(
-                    Platform::YouTube,
-                    "YOUTUBE_CLIENT_ID is not configured",
-                )),
-            );
-        }
-    }
+    auth_providers.insert(
+        Platform::YouTube,
+        Arc::new(YouTubeAuthProvider::new(youtube_config.clone())),
+    );
+    connectors.insert(
+        Platform::YouTube,
+        Arc::new(YouTubeConnector::new(
+            YouTubeApiClient::new(youtube_config),
+            secure_storage.clone(),
+        )),
+    );
 
     match (&tiktok_config, &broker_client) {
         (Some(config), Some(broker)) => {
@@ -490,14 +468,7 @@ async fn bootstrap(
     );
     publishers.insert(
         Platform::YouTube,
-        if youtube_configured {
-            Arc::new(YouTubeUploader::new()) as Arc<dyn PlatformPublisher>
-        } else {
-            Arc::new(StubPublisher::new(
-                Platform::YouTube,
-                "YOUTUBE_CLIENT_ID is not configured",
-            )) as Arc<dyn PlatformPublisher>
-        },
+        Arc::new(YouTubeUploader::new()) as Arc<dyn PlatformPublisher>,
     );
     publishers.insert(
         Platform::TikTok,
@@ -523,6 +494,10 @@ async fn bootstrap(
     let provider_rate_limit_service = Arc::new(ProviderRateLimitService::new(Arc::new(
         SqliteProviderRateStateRepository::new(pool.clone()),
     )));
+    let provider_configuration_health_service = Arc::new(ProviderConfigurationHealthService::new(
+        tiktok_config.is_some(),
+        broker_client.clone(),
+    ));
     let publishing_engine_service = Arc::new(PublishingEngineService::new(
         publication_repo.clone(),
         publication_attempt_repo,
@@ -682,6 +657,7 @@ async fn bootstrap(
         publishing_readiness_service,
         metadata_template_service,
         provider_rate_limit_service,
+        provider_configuration_health_service,
         job_runner,
         video_repo,
         paths,

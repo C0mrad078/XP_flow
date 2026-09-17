@@ -10,6 +10,7 @@ pub mod media_ingestion_service;
 pub mod metadata_template_service;
 pub mod platform_account_service;
 pub mod platform_auth_service;
+pub mod provider_configuration_health_service;
 pub mod provider_rate_limit_service;
 pub mod publication_service;
 pub mod publishing_engine_service;

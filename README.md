@@ -139,11 +139,13 @@ cargo clippy   # Lint
 cargo build    # Compile
 ```
 
-The desktop app runs and connects a real YouTube account with no other setup beyond `YOUTUBE_CLIENT_ID`/
-`YOUTUBE_CLIENT_SECRET` in its environment. TikTok/Kwai need the separate Auth Broker service running too — see
+The desktop app connects a real YouTube account out of the box — it ships with its own Google OAuth Desktop
+client id built in, so no environment setup is needed for YouTube at all. A `YOUTUBE_CLIENT_ID` environment
+override still exists for anyone testing against their own Google Cloud project; no client secret is ever
+required (the desktop flow is PKCE-only). TikTok/Kwai need the separate Auth Broker service running — see
 `docs/auth-broker.md` for setup (`services/auth-broker/`, its own `cargo test`/`cargo build`, its own `.env`).
-Neither is required to build or run XP FLOW itself; an unconfigured provider degrades to a clean
-"not configured" state instead of failing to start.
+The Auth Broker is not required to build or run XP FLOW itself; TikTok/Kwai degrade to a clean
+"not configured"/"service unavailable" state instead of failing to start.
 
 ## Where XP FLOW stores its data
 

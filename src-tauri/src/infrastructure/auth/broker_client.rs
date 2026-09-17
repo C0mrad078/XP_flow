@@ -159,6 +159,27 @@ impl BrokerClient {
         self.post_empty(&url).await
     }
 
+    /// Live reachability check against the broker's own `/v1/health` route.
+    /// Used only to feed a soft configuration-health display (e.g. "Auth
+    /// service unavailable") — never called on the path of an actual auth
+    /// operation, which already gets `AuthError::BrokerUnavailable` from a
+    /// real transport failure via `map_transport_err`.
+    pub async fn health_check(&self) -> Result<(), AuthError> {
+        let url = format!("{}/v1/health", self.base_url);
+        let response = self
+            .http
+            .get(&url)
+            .timeout(BROKER_POLL_TIMEOUT)
+            .send()
+            .await
+            .map_err(map_transport_err)?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(AuthError::BrokerUnavailable)
+        }
+    }
+
     pub async fn revoke_connection(&self, connection_id: &str) -> Result<(), AuthError> {
         let url = format!("{}/v1/connections/{connection_id}/revoke", self.base_url);
         let response = self

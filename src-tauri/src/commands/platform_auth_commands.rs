@@ -1,11 +1,28 @@
 use tauri::State;
 use uuid::Uuid;
 
+use crate::application::provider_configuration_health_service::ProviderConfigurationHealth;
 use crate::domain::oauth::AuthFlowState;
 use crate::domain::platform::Platform;
 use crate::domain::platform_account::PlatformAccount;
 use crate::error::AppError;
 use crate::state::AppState;
+
+/// Backend-authoritative connect-readiness for every platform (fix for
+/// the Connect Account UX: the frontend never filters the provider list
+/// itself — it always renders YouTube/TikTok/Kwai and uses this to pick
+/// each card's state/button). Infallible by construction: an unreachable
+/// broker is a real `BrokerUnavailable` status here, never a command
+/// error, so the dialog is never left empty because this call "failed."
+#[tauri::command]
+pub async fn get_provider_configuration_health(
+    state: State<'_, AppState>,
+) -> Result<Vec<ProviderConfigurationHealth>, AppError> {
+    Ok(state
+        .provider_configuration_health_service
+        .check_all()
+        .await)
+}
 
 #[tauri::command]
 pub async fn begin_platform_connect(

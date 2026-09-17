@@ -79,7 +79,9 @@ boundaries themselves.
     broker-only environment variables (`services/auth-broker/`) and must never appear in `src-tauri/`'s source,
     environment, or build output. `YOUTUBE_CLIENT_SECRET` is the one exception — Google's own threat model doesn't
     treat an installed app's secret as confidential — but it's still resolved from an environment variable
-    (`YouTubeAuthConfig::resolve()`), never a literal string in source.
+    (`YouTubeAuthConfig::resolve()`), never a literal string in source, and the desktop PKCE flow never requires it
+    to be set at all. A **client id** is a different thing: it's non-secret by definition, which is why
+    `YouTubeAuthConfig::DEFAULT_CLIENT_ID` is a literal in source — that's deliberate, not an exception to this rule.
 22. **A secret-shaped type gets a redacting `Debug` impl, not caller discipline.** `LocalCredential` and `Pkce` both
     implement `fmt::Debug` by hand to print `"[redacted]"` for their secret fields — see
     `infrastructure::auth::redact` (desktop) and `redact.rs` (broker) for the shared pattern. If a new type ever
