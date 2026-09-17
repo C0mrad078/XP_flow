@@ -59,7 +59,7 @@ use infrastructure::connectors::youtube::{
 use infrastructure::connectors::{StubAuthProvider, StubConnector};
 use infrastructure::hashing::{DHashPerceptualHashService, Sha256ContentHashService};
 use infrastructure::media::{FfmpegMediaService, FfmpegThumbnailService, FfprobeMediaProbeService};
-use infrastructure::publishing::StubPublisher;
+use infrastructure::publishing::{StubPublisher, TauriProgressPublisher};
 use infrastructure::repositories::{
     SqliteActivityRepository, SqliteChannelRepository, SqliteDuplicateMatchRepository,
     SqliteHashtagSetRepository, SqliteJobRepository, SqliteMetadataTemplateRepository,
@@ -119,8 +119,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             let paths = paths.clone();
-            let state = tauri::async_runtime::block_on(async move { bootstrap(paths).await })
-                .expect("failed to initialize XP FLOW backend");
+            let app_handle = app.handle().clone();
+            let state =
+                tauri::async_runtime::block_on(async move { bootstrap(paths, app_handle).await })
+                    .expect("failed to initialize XP FLOW backend");
             app.manage(state);
             Ok(())
         })
@@ -242,7 +244,10 @@ pub fn run() {
 /// its application service, and records the startup trail the Activity
 /// screen shows on first launch (section 30's worked example: "Application
 /// started" / "Database migration completed").
-async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Error>> {
+async fn bootstrap(
+    paths: AppPaths,
+    app_handle: tauri::AppHandle,
+) -> Result<AppState, Box<dyn std::error::Error>> {
     let pool = persistence::db::init_pool(&paths.database_path()).await?;
     tracing::info!("database migrations applied");
 
@@ -531,6 +536,7 @@ async fn bootstrap(paths: AppPaths) -> Result<AppState, Box<dyn std::error::Erro
         metadata_template_service.clone(),
         provider_rate_limit_service.clone(),
         settings_service.clone(),
+        Arc::new(TauriProgressPublisher::new(app_handle)),
         publishers.clone(),
         activity_service.clone(),
         notification_service.clone(),

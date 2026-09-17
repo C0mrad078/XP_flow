@@ -16,6 +16,7 @@ use crate::domain::channel::ChannelStatus;
 use crate::domain::platform::Platform;
 use crate::domain::ports::hashing::ContentHashService;
 use crate::domain::ports::platform_publisher::{CancelSignal, PlatformPublisher};
+use crate::domain::ports::progress_publisher::ProgressPublisher;
 use crate::domain::ports::repositories::{
     ChannelRepository, ExecutionStateUpdate, PlatformAccountRepository,
     PublicationAttemptRepository, PublicationConsentRepository, PublicationRepository,
@@ -105,6 +106,7 @@ pub struct PublishingEngineService {
     metadata_service: Arc<crate::application::metadata_template_service::MetadataTemplateService>,
     rate_limit_service: Arc<ProviderRateLimitService>,
     settings_service: Arc<SettingsService>,
+    progress_publisher: Arc<dyn ProgressPublisher>,
     publishers: HashMap<Platform, Arc<dyn PlatformPublisher>>,
     activity_service: Arc<ActivityService>,
     notification_service: Arc<NotificationService>,
@@ -127,6 +129,7 @@ impl PublishingEngineService {
         >,
         rate_limit_service: Arc<ProviderRateLimitService>,
         settings_service: Arc<SettingsService>,
+        progress_publisher: Arc<dyn ProgressPublisher>,
         publishers: HashMap<Platform, Arc<dyn PlatformPublisher>>,
         activity_service: Arc<ActivityService>,
         notification_service: Arc<NotificationService>,
@@ -144,6 +147,7 @@ impl PublishingEngineService {
             metadata_service,
             rate_limit_service,
             settings_service,
+            progress_publisher,
             publishers,
             activity_service,
             notification_service,
@@ -607,12 +611,42 @@ impl PublishingEngineService {
         };
         let _ = self.session_repo.create(&session).await;
 
-        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
-        // Section 90/91: progress is forwarded here for a future event-
-        // bus subscriber; nothing persists a row per event (section 149)
-        // — the durable checkpoint is the session update below, once,
-        // after the transfer finishes rather than per byte.
-        tokio::spawn(async move { while progress_rx.recv().await.is_some() {} });
+        let (progress_tx, mut progress_rx): (
+            crate::domain::ports::platform_publisher::ProgressSender,
+            _,
+        ) = mpsc::unbounded_channel();
+        // Section 90/91/28: forwarded live to the frontend event bus as
+        // each chunk is acknowledged; nothing here persists a row per
+        // event (section 149) — the durable checkpoint is the session
+        // update below, once, after the transfer finishes rather than
+        // per byte. Progress is inherently transient (section 29): the
+        // frontend never treats one of these as a final result.
+        let progress_publisher = self.progress_publisher.clone();
+        let progress_publication_id = publication_id;
+        let progress_attempt_id = attempt.id;
+        let progress_platform = publication.platform;
+        tokio::spawn(async move {
+            while let Some(update) = progress_rx.recv().await {
+                let percentage = update.bytes_total.and_then(|total| {
+                    if total > 0 {
+                        Some((update.bytes_uploaded as f64 / total as f64) * 100.0)
+                    } else {
+                        None
+                    }
+                });
+                progress_publisher.publish(
+                    crate::domain::ports::progress_publisher::PublishProgressEvent {
+                        publication_id: progress_publication_id,
+                        attempt_id: progress_attempt_id,
+                        platform: progress_platform,
+                        bytes_uploaded: update.bytes_uploaded,
+                        bytes_total: update.bytes_total,
+                        percentage,
+                        phase: crate::domain::ports::progress_publisher::PublishProgressPhase::Uploading,
+                    },
+                );
+            }
+        });
 
         let (updated_session, upload_result) = publisher
             .upload_media(
@@ -1399,6 +1433,7 @@ mod tests {
             Arc::new(SettingsService::new(Arc::new(
                 SqliteSettingsRepository::new(pool.clone()),
             ))),
+            Arc::new(crate::domain::ports::progress_publisher::NullProgressPublisher),
             publishers,
             activity_service,
             notification_service,

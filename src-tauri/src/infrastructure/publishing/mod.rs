@@ -7,6 +7,8 @@
 pub mod fake_publisher;
 pub mod http_client;
 pub mod stub_publisher;
+pub mod tauri_progress_publisher;
 
 pub use fake_publisher::{FakePublisher, FakeScenario};
 pub use stub_publisher::StubPublisher;
+pub use tauri_progress_publisher::{TauriProgressPublisher, PUBLISH_PROGRESS_EVENT};
