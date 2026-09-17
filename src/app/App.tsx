@@ -7,6 +7,7 @@ import { ConfirmDialogHost } from "@/components/feedback/confirm-dialog";
 import { Toaster } from "@/components/feedback/toaster";
 import { LoadingState } from "@/components/feedback/loading-state";
 import { OnboardingScreen } from "@/features/onboarding/onboarding-screen";
+import { usePublishProgressListener } from "@/hooks/use-publish-progress";
 import { useSettingsStore } from "@/stores/settings-store";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 
@@ -49,6 +50,7 @@ function AppContent() {
   const workspaceLoaded = useWorkspaceStore((state) => state.isLoaded);
   const loadSettings = useSettingsStore((state) => state.load);
   const settingsLoaded = useSettingsStore((state) => state.isLoaded);
+  usePublishProgressListener();
 
   useEffect(() => {
     loadWorkspace();

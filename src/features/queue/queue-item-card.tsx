@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { PlatformBadge } from "@/components/ui/platform-badge";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { usePublicationProgress } from "@/hooks/use-publish-progress";
 import { formatTimeInZone } from "@/lib/formatting/date";
 import { cn } from "@/lib/utilities/cn";
 import { VIDEO_PRIORITY_LABELS, type VideoPriority } from "@/types/media";
@@ -37,6 +38,7 @@ export function QueueItemCard({
   onClick,
   accountConnected = true,
 }: QueueItemCardProps) {
+  const progress = usePublicationProgress(publication.id);
   return (
     <button
       type="button"
@@ -76,6 +78,11 @@ export function QueueItemCard({
         )}
         <PlatformBadge platform={publication.platform} size="sm" iconOnly />
         <StatusBadge status={publication.status} className="px-1.5 py-0 text-[0.625rem]" />
+        {publication.status === "uploading" && progress?.percentage != null && (
+          <span className="font-mono-data text-[0.625rem] text-primary" aria-label="Upload progress">
+            {Math.round(progress.percentage)}%
+          </span>
+        )}
       </div>
 
       <span className="w-16 shrink-0 text-right font-mono-data text-body-small text-muted-foreground">

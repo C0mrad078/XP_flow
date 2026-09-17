@@ -1,5 +1,21 @@
 import type { ISODateTime, Platform, UUID } from "./domain";
 
+/** Mirrors `domain::ports::progress_publisher::PublishProgressPhase`. */
+export type PublishProgressPhase = "uploading" | "finalizing";
+
+/** Mirrors `domain::ports::progress_publisher::PublishProgressEvent` —
+ * emitted on the "publish-progress" Tauri event. Always transient: never
+ * cached as query state, never treated as a final result (section 29). */
+export interface PublishProgressEvent {
+  publication_id: UUID;
+  attempt_id: UUID;
+  platform: Platform;
+  bytes_uploaded: number;
+  bytes_total: number | null;
+  percentage: number | null;
+  phase: PublishProgressPhase;
+}
+
 export type AttemptStatus = "pending" | "running" | "succeeded" | "failed" | "cancelled";
 export type RateLimitOperation = "publish" | "status" | "auth" | "comments" | "analytics";
 export type TemplateKind = "title" | "description";

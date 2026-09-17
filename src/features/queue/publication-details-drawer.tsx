@@ -36,6 +36,7 @@ import {
   useRetryPublication,
   useUpdatePublicationMetadata,
 } from "@/hooks/use-publishing";
+import { usePublicationProgress } from "@/hooks/use-publish-progress";
 import {
   isAppError,
   isPublicationOverdue,
@@ -151,9 +152,16 @@ function DetailBody({ publication, onClose }: { publication: Publication; onClos
   // set specifically for this) or last_error's free text.
   const needsVerification = publication.last_error_code === UNKNOWN_REMOTE_RESULT_CODE;
   const latestAttempt = attempts.data?.[attempts.data.length - 1];
+  const liveProgress = usePublicationProgress(publication.id);
+  // Live events (section 28) update instantly; the attempt-derived value
+  // is the fallback until the first event of this session arrives, and
+  // stays accurate even if the event stream was missed for any reason —
+  // the persisted attempt is always the authoritative fallback.
+  const bytesUploaded = liveProgress?.bytes_uploaded ?? latestAttempt?.bytes_uploaded ?? null;
+  const bytesTotal = liveProgress?.bytes_total ?? latestAttempt?.bytes_total ?? null;
   const progress =
-    latestAttempt?.bytes_total && latestAttempt.bytes_total > 0
-      ? Math.min(100, Math.round(((latestAttempt.bytes_uploaded ?? 0) / latestAttempt.bytes_total) * 100))
+    bytesTotal && bytesTotal > 0
+      ? Math.min(100, Math.round(((bytesUploaded ?? 0) / bytesTotal) * 100))
       : null;
 
   return (
@@ -412,8 +420,7 @@ function DetailBody({ publication, onClose }: { publication: Publication; onClos
             aria-label={`Upload progress ${progress}%`}
           />
           <p className="mt-1 text-caption normal-case tracking-normal text-muted-foreground">
-            {(latestAttempt?.bytes_uploaded ?? 0).toLocaleString()} /{" "}
-            {(latestAttempt?.bytes_total ?? 0).toLocaleString()} bytes
+            {(bytesUploaded ?? 0).toLocaleString()} / {(bytesTotal ?? 0).toLocaleString()} bytes
           </p>
         </div>
       )}
