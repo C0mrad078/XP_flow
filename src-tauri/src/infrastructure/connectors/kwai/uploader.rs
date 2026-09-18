@@ -316,11 +316,7 @@ impl PlatformPublisher for KwaiUploader {
             let response = match result {
                 Ok(response) => response,
                 Err(err) => {
-                    session.state = if offset > 0 {
-                        RemoteUploadState::Transferring
-                    } else {
-                        RemoteUploadState::Initialized
-                    };
+                    session.state = RemoteUploadState::Transferring;
                     return (session, Err(map_transport_err(err)));
                 }
             };

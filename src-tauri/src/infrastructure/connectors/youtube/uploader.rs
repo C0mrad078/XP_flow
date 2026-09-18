@@ -293,11 +293,7 @@ impl PlatformPublisher for YouTubeUploader {
                     // session is left `Transferring` (not safe to
                     // restart) so recovery re-queries the provider's
                     // actual committed range instead of assuming.
-                    session.state = if offset > 0 {
-                        RemoteUploadState::Transferring
-                    } else {
-                        RemoteUploadState::Initialized
-                    };
+                    session.state = RemoteUploadState::Transferring;
                     return (session, Err(map_transport_err(err)));
                 }
             };
@@ -337,11 +333,10 @@ impl PlatformPublisher for YouTubeUploader {
                     }),
                 );
             } else if status == 404 {
-                // Expired/invalid session (section 42) — nothing else can
-                // claim this URL, so restarting from scratch is safe.
-                session.state = RemoteUploadState::NotStarted;
-                session.remote_upload_url = None;
-                return (session, Err(PublishError::UploadSessionExpired));
+                // An expired session does not prove the final chunk was
+                // rejected; its response may have been lost locally.
+                session.state = RemoteUploadState::RemoteUnknown;
+                return (session, Err(PublishError::UnknownRemoteResult));
             } else {
                 session.state = RemoteUploadState::RemoteUnknown;
                 return (session, Err(classify_response(&response)));
@@ -452,17 +447,17 @@ impl PlatformPublisher for YouTubeUploader {
                 // The provider actually has it despite the local
                 // interruption — never re-upload; recover the video id
                 // from this same response instead.
-                if let Ok(resource) = response.json::<VideoResource>().await {
-                    session.remote_publish_id = Some(resource.id);
-                }
+                let resource = response
+                    .json::<VideoResource>()
+                    .await
+                    .map_err(|_| PublishError::UnknownRemoteResult)?;
+                session.remote_publish_id = Some(resource.id);
                 session.bytes_committed = total;
                 session.state = RemoteUploadState::Transferred;
                 return Ok(session);
             }
             404 => {
-                session.state = RemoteUploadState::NotStarted;
-                session.remote_upload_url = None;
-                return Ok(session);
+                return Err(PublishError::UnknownRemoteResult);
             }
             _ => return Err(classify_response(&response)),
         }
@@ -634,6 +629,36 @@ mod tests {
         assert_eq!(session.state, RemoteUploadState::Transferred);
         assert_eq!(session.bytes_committed, 10);
         assert_eq!(session.remote_publish_id.as_deref(), Some("yt-video-123"));
+    }
+
+    #[tokio::test]
+    async fn expired_session_after_an_uncertain_write_never_restarts_blindly() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/upload/session/expired"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let uploader = YouTubeUploader::with_base_url(&server.uri(), 8 * 1024 * 1024);
+        let dir = temp_dir("youtube-uploader-expired-session");
+        let file_path = write_fake_video(&dir, "clip.mp4", b"0123456789");
+        let video = sample_video(&file_path, 10);
+        let mut session = UploadSession::new(
+            Uuid::nil(),
+            Uuid::nil(),
+            Platform::YouTube,
+            SessionType::Resumable,
+        );
+        session.remote_upload_url = Some(format!("{}/upload/session/expired", server.uri()));
+        session.bytes_total = Some(10);
+        session.state = RemoteUploadState::Transferring;
+
+        assert!(matches!(
+            uploader
+                .recover_upload("access-token", session, &video)
+                .await,
+            Err(PublishError::UnknownRemoteResult)
+        ));
     }
 
     #[tokio::test]

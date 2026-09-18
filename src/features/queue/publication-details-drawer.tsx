@@ -140,6 +140,40 @@ function DetailBody({ publication, onClose }: { publication: Publication; onClos
     });
   }
 
+  async function handlePublishNow() {
+    const confirmed = await confirmAction({
+      title: "Publish this now?",
+      description: `This will upload “${publication.title}” to ${publication.platform} immediately.`,
+      confirmLabel: "Publish now",
+    });
+    if (!confirmed) return;
+    publishNow.mutate(publication.id, {
+      onError: (error) =>
+        toast({
+          variant: "error",
+          title: "Couldn't publish",
+          description: isAppError(error) ? error.user_message : undefined,
+        }),
+    });
+  }
+
+  async function handleRetry() {
+    const confirmed = await confirmAction({
+      title: "Retry this publication now?",
+      description: `This may upload “${publication.title}” to ${publication.platform} immediately.`,
+      confirmLabel: "Retry publication",
+    });
+    if (!confirmed) return;
+    retry.mutate(publication.id, {
+      onError: (error) =>
+        toast({
+          variant: "error",
+          title: "Couldn't retry",
+          description: isAppError(error) ? error.user_message : undefined,
+        }),
+    });
+  }
+
   /** Section 65 — a plain, non-secret publishing snapshot for a support
    * request. `remote_operation_id` is the provider's own post/video id
    * (safe — it's what a support agent needs to look the post up), never
@@ -321,7 +355,7 @@ function DetailBody({ publication, onClose }: { publication: Publication; onClos
         {canPublishNow && !needsVerification && (
           <Button
             size="sm"
-            onClick={() => publishNow.mutate(publication.id)}
+            onClick={handlePublishNow}
             disabled={publishNow.isPending || Boolean(readiness.data?.length)}
           >
             <Send className="size-3.5" />
@@ -329,12 +363,7 @@ function DetailBody({ publication, onClose }: { publication: Publication; onClos
           </Button>
         )}
         {canRetry && !needsVerification && (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => retry.mutate(publication.id)}
-            disabled={retry.isPending}
-          >
+          <Button size="sm" variant="outline" onClick={handleRetry} disabled={retry.isPending}>
             <RefreshCcw className="size-3.5" />
             Retry
           </Button>

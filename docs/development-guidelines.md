@@ -4,6 +4,12 @@ Conventions for working in this codebase. Most of these exist because violating 
 architectural problems Phase 1 was built to avoid — see `docs/architecture.md` for the reasoning behind the
 boundaries themselves.
 
+## Development phase completion and release validation
+
+A development phase is complete when its scoped engineering work, relevant automated tests, supported builds, persistence and documentation are complete, and known engineering defects within scope are resolved. A known in-scope engineering defect still blocks completion.
+
+Third-party credentials, manual provider consent, unavailable operating systems or runtimes, screen capture permissions and other required external interactions do not hold a development phase open indefinitely. Record each unperformed check as a persistent release gate in [release-validation.md](release-validation.md). Release gates must pass before production readiness, but may remain pending while the next development phase begins. Never claim an external test passed without evidence.
+
 ## Architectural rules (non-negotiable)
 
 1. **React components never touch SQLite.** All persistence goes through `src/lib/tauri/*` → a Tauri command → an

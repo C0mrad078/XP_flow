@@ -287,6 +287,9 @@ impl PublishingEngineService {
                 detail: "publication is locked".to_string(),
             });
         }
+        if publication.last_error_code.as_deref() == Some("UNKNOWN_REMOTE_RESULT") {
+            return Err(PublishError::UnknownRemoteResult);
+        }
         match self.channel_repo.get(publication.channel_id).await {
             Ok(Some(channel)) if channel.status == ChannelStatus::Paused => {
                 return Err(PublishError::Internal {
@@ -570,7 +573,18 @@ impl PublishingEngineService {
         let mut attempt =
             PublicationAttempt::new(publication_id, attempt_number, publication.platform);
         attempt.start();
-        let _ = self.attempt_repo.create(&attempt).await;
+        if let Err(e) = self.attempt_repo.create(&attempt).await {
+            return self
+                .fail_and_release(
+                    &publication,
+                    claim_token,
+                    PublishError::Internal {
+                        detail: format!("could not persist attempt: {e}"),
+                    },
+                    attempt_number,
+                )
+                .await;
+        }
 
         let access_token = match self.credential_service.acquire(&account).await {
             Ok(token) => token,
@@ -609,7 +623,21 @@ impl PublishingEngineService {
                     .await
             }
         };
-        let _ = self.session_repo.create(&session).await;
+        // A request may reach the provider before this process sees its reply.
+        // Persist the resumable URL and conservative state before the first PUT.
+        session.state = RemoteUploadState::Transferring;
+        if let Err(e) = self.session_repo.create(&session).await {
+            return self
+                .finish_attempt_failure(
+                    &publication,
+                    claim_token,
+                    &mut attempt,
+                    PublishError::Internal {
+                        detail: format!("could not persist upload session: {e}"),
+                    },
+                )
+                .await;
+        }
 
         let (progress_tx, mut progress_rx): (
             crate::domain::ports::platform_publisher::ProgressSender,
@@ -658,8 +686,29 @@ impl PublishingEngineService {
             )
             .await;
         session = updated_session;
-        let _ = self.session_repo.update(&session).await;
+        self.session_repo
+            .update(&session)
+            .await
+            .map_err(|e| PublishError::Internal {
+                detail: format!("could not persist upload result: {e}"),
+            })?;
+        if let Some(remote_id) = &session.remote_publish_id {
+            attempt.remote_operation_id = Some(remote_id.clone());
+            self.attempt_repo
+                .update(&attempt)
+                .await
+                .map_err(|e| PublishError::Internal {
+                    detail: format!("could not persist remote operation ID in attempt: {e}"),
+                })?;
+        }
         if let Err(err) = upload_result {
+            // A failed response is not proof that the remote write failed.
+            // Keep the session for reconciliation and forbid a blind repost.
+            let err = if session.state.safe_to_restart() {
+                err
+            } else {
+                PublishError::UnknownRemoteResult
+            };
             return self
                 .finish_attempt_failure(&publication, claim_token, &mut attempt, err)
                 .await;
@@ -850,7 +899,8 @@ impl PublishingEngineService {
 
         match state {
             RemoteUploadState::RemoteSucceeded => {
-                self.publication_repo
+                let finished = self
+                    .publication_repo
                     .try_finish_processing(
                         publication_id,
                         PublicationStatus::Published,
@@ -863,13 +913,17 @@ impl PublishingEngineService {
                     .map_err(|e| PublishError::Internal {
                         detail: e.to_string(),
                     })?;
-                self.log_success(&publication).await;
+                if finished {
+                    self.finish_processing_attempt(&session, None).await?;
+                    self.log_success(&publication).await;
+                }
             }
             RemoteUploadState::RemoteFailed => {
                 let remote_processing_failed = PublishError::RemoteProcessingFailed {
                     detail: "the platform failed to process the upload".to_string(),
                 };
-                self.publication_repo
+                let finished = self
+                    .publication_repo
                     .try_finish_processing(
                         publication_id,
                         PublicationStatus::Failed,
@@ -882,8 +936,45 @@ impl PublishingEngineService {
                     .map_err(|e| PublishError::Internal {
                         detail: e.to_string(),
                     })?;
+                if finished {
+                    self.finish_processing_attempt(&session, Some(&remote_processing_failed))
+                        .await?;
+                }
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    async fn finish_processing_attempt(
+        &self,
+        session: &crate::domain::publishing::UploadSession,
+        error: Option<&PublishError>,
+    ) -> Result<(), PublishError> {
+        let Some(mut attempt) = self
+            .attempt_repo
+            .get(session.attempt_id)
+            .await
+            .map_err(|e| PublishError::Internal {
+                detail: e.to_string(),
+            })?
+        else {
+            return Err(PublishError::Internal {
+                detail: "processing attempt is missing".to_string(),
+            });
+        };
+        if !attempt.status.is_terminal() {
+            if let Some(error) = error {
+                attempt.fail(error);
+            } else {
+                attempt.succeed(session.remote_publish_id.clone());
+            }
+            self.attempt_repo
+                .update(&attempt)
+                .await
+                .map_err(|e| PublishError::Internal {
+                    detail: e.to_string(),
+                })?;
         }
         Ok(())
     }
@@ -981,7 +1072,7 @@ impl PublishingEngineService {
                 let _ = self.session_repo.update(&recovered).await;
                 match recovered.state {
                     RemoteUploadState::RemoteSucceeded => {
-                        let _ = self
+                        let finished = self
                             .publication_repo
                             .update_execution_state(
                                 publication.id,
@@ -998,8 +1089,12 @@ impl PublishingEngineService {
                                     published_at: Some(Utc::now()),
                                 },
                             )
-                            .await;
-                        self.log_success(&publication).await;
+                            .await
+                            .unwrap_or(false);
+                        if finished {
+                            let _ = self.finish_processing_attempt(&recovered, None).await;
+                            self.log_success(&publication).await;
+                        }
                     }
                     RemoteUploadState::RemoteProcessing | RemoteUploadState::Transferred => {
                         let _ = self
@@ -1022,7 +1117,7 @@ impl PublishingEngineService {
                             .await;
                     }
                     _ => {
-                        let _ = self
+                        let finished = self
                             .publication_repo
                             .update_execution_state(
                                 publication.id,
@@ -1041,9 +1136,18 @@ impl PublishingEngineService {
                                     published_at: None,
                                 },
                             )
-                            .await;
-                        self.requeue_for_retry(&publication, publication.retry_count + 1, None)
-                            .await;
+                            .await
+                            .unwrap_or(false);
+                        if finished {
+                            let error = PublishError::RemoteProcessingFailed {
+                                detail: "recovery reported a failed remote result".to_string(),
+                            };
+                            let _ = self
+                                .finish_processing_attempt(&recovered, Some(&error))
+                                .await;
+                            self.requeue_for_retry(&publication, publication.retry_count + 1, None)
+                                .await;
+                        }
                     }
                 }
             }
@@ -1765,6 +1869,11 @@ mod tests {
 
         let after_upload = fixture.publication_repo.get(id).await.unwrap().unwrap();
         assert_eq!(after_upload.status, PublicationStatus::Processing);
+        let attempts = fixture.attempt_repo.list_for_publication(id).await.unwrap();
+        assert_eq!(
+            attempts[0].status,
+            crate::domain::publishing::AttemptStatus::Running
+        );
 
         fixture.engine.poll_processing(id).await.unwrap();
         let after_first_poll = fixture.publication_repo.get(id).await.unwrap().unwrap();
@@ -1777,6 +1886,57 @@ mod tests {
         fixture.engine.poll_processing(id).await.unwrap();
         let after_second_poll = fixture.publication_repo.get(id).await.unwrap().unwrap();
         assert_eq!(after_second_poll.status, PublicationStatus::Published);
+        let attempts = fixture.attempt_repo.list_for_publication(id).await.unwrap();
+        assert_eq!(
+            attempts[0].status,
+            crate::domain::publishing::AttemptStatus::Succeeded
+        );
+        assert!(attempts[0].completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn interrupted_upload_keeps_its_session_and_never_auto_reposts() {
+        let fixture = build_fixture(FakeScenario::InterruptedThenRecoverable).await;
+        let id = seed_ready_publication(
+            &fixture.pool,
+            fixture.workspace_id,
+            fixture.channel_id,
+            fixture.source_id,
+        )
+        .await;
+        let (claimed_id, claim_token) = fixture
+            .engine
+            .scan_and_claim_due(fixture.workspace_id)
+            .await
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(claimed_id, id);
+        fixture.engine.execute(id, claim_token).await;
+
+        let publication = fixture.publication_repo.get(id).await.unwrap().unwrap();
+        assert_eq!(publication.status, PublicationStatus::Failed);
+        assert_eq!(
+            publication.last_error_code.as_deref(),
+            Some("UNKNOWN_REMOTE_RESULT")
+        );
+        assert!(fixture
+            .engine
+            .scan_and_claim_due(fixture.workspace_id)
+            .await
+            .is_empty());
+        let session = fixture
+            .session_repo
+            .latest_for_publication(id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.state, RemoteUploadState::Transferring);
+        assert!(session.bytes_committed > 0);
+        assert!(matches!(
+            fixture.engine.publish_now(id).await,
+            Err(PublishError::UnknownRemoteResult)
+        ));
     }
 
     #[tokio::test]
@@ -2223,5 +2383,9 @@ mod tests {
         // automatic retry — it stays exactly where a human left it,
         // still Failed, not bounced back to Scheduled.
         assert!(updated.scheduled_at.is_none() || updated.status == PublicationStatus::Failed);
+        assert!(matches!(
+            fixture.engine.publish_now(publication_id).await,
+            Err(PublishError::UnknownRemoteResult)
+        ));
     }
 }

@@ -14,7 +14,7 @@ The backend broadcasts a `publish-progress` Tauri event on every acknowledged ch
 
 ## Actions by state
 
-Publish Now is available for queued/scheduled and recoverable states when readiness checks pass. Retry is limited to safe failed or rate-limited states. Scheduling controls are unavailable while an upload or provider processing operation is active. The backend validates every action independently.
+Publish Now is available for queued/scheduled and recoverable states when readiness checks pass. Retry is limited to safe failed or rate-limited states. Both immediate actions ask for confirmation before starting a real provider request. Scheduling controls are unavailable while an upload or provider processing operation is active. The backend validates every action independently and refuses an `UNKNOWN_REMOTE_RESULT` even if invoked outside the UI.
 
 ## Metadata
 

@@ -17,8 +17,8 @@ written — not assumed from prior training knowledge.
    - `308 Resume Incomplete` on every non-final chunk — the expected steady-state response.
    - `200`/`201` with the created video resource on the final chunk — the video id is captured directly from this
      response body.
-   - `404` — the session expired; mapped to `PublishError::UploadSessionExpired`, safe to restart from scratch
-     (`RemoteUploadState::NotStarted`).
+   - `404` after a transfer may have begun — the session is unavailable, but the final write might still have
+     succeeded. It is treated as `UnknownRemoteResult` and is not blindly restarted.
    - `5xx` — `PublishError::ProviderServerError`, retryable.
 3. **Finalize** is a no-op passthrough — the final chunk's response _is_ the created resource; there's no separate
    "publish" call the way TikTok/Kwai have one.

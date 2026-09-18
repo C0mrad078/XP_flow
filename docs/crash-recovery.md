@@ -42,8 +42,8 @@ For each expired claim, `recover_one` loads the most recent `UploadSession` for 
   happens, per provider:
   - **YouTube**: an empty `PUT` with `Content-Range: bytes */TOTAL` against the resumable session URL returns
     either a `308` with the real committed byte range (resume from there), a `200`/`201` with the finished video
-    resource (it was already done — capture the video id, don't re-upload), or a `404` (session expired, safe to
-    restart from scratch).
+    resource (it was already done — capture the video id, don't re-upload), or a `404` (session unavailable; the remote
+    result remains unknown, so automatic restart is refused).
   - **TikTok**: no byte-range probe exists in its API, so the transfer's own `publish_id` status is checked first;
     if that's inconclusive, resuming continues from the last chunk this process itself confirmed a `2xx` for
     (never a chunk that was only queued to send).
