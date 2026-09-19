@@ -16,6 +16,7 @@ pub struct CallbackParams {
     pub code: Option<String>,
     pub state: Option<String>,
     pub error: Option<String>,
+    pub error_description: Option<String>,
 }
 
 /// A short-lived, single-use loopback HTTP server for an OAuth redirect
@@ -104,7 +105,13 @@ impl LoopbackListener {
                 AuthError::AuthCancelled
             } else {
                 AuthError::TokenExchangeFailed {
-                    detail: format!("provider returned error: {error}"),
+                    detail: format!(
+                        "provider returned error: {error}{}",
+                        params
+                            .error_description
+                            .map(|description| format!(" ({description})"))
+                            .unwrap_or_default()
+                    ),
                 }
             });
         }
@@ -142,6 +149,7 @@ async fn handle_callback(
         code: params.get("code").cloned(),
         state: params.get("state").cloned(),
         error: params.get("error").cloned(),
+        error_description: params.get("error_description").cloned(),
     };
     if let Some(tx) = sender.lock().await.take() {
         let _ = tx.send(callback);

@@ -109,14 +109,17 @@ pub fn map_scopes_to_capabilities(platform: Platform, scopes: &[String]) -> Vec<
     capabilities
 }
 
-/// The minimal scope set Phase 4 requests per provider — identity/read
-/// only, never publishing (section 8/15's least-privilege requirement).
+/// The minimal scope set required by the current product per provider. YouTube
+/// includes upload because a connected account must remain usable by the
+/// publishing engine; TikTok/Kwai retain their provider-specific identity
+/// scopes until their publishing integrations request more.
 pub fn default_requested_scopes(platform: Platform) -> Vec<String> {
     match platform {
         Platform::YouTube => vec![
             "openid".to_string(),
             "https://www.googleapis.com/auth/userinfo.profile".to_string(),
             "https://www.googleapis.com/auth/youtube.readonly".to_string(),
+            "https://www.googleapis.com/auth/youtube.upload".to_string(),
         ],
         Platform::TikTok => vec!["user.info.basic".to_string()],
         Platform::Kwai => vec!["user_info".to_string()],
@@ -170,14 +173,21 @@ mod tests {
     }
 
     #[test]
-    fn default_requested_scopes_never_include_publishing() {
-        for platform in Platform::ALL {
-            let scopes = default_requested_scopes(platform);
-            let capabilities = map_scopes_to_capabilities(platform, &scopes);
-            assert!(
-                !capabilities.contains(&Capability::UploadVideo),
-                "{platform:?} default scopes must stay least-privilege in Phase 4"
-            );
+    fn youtube_defaults_include_publishing_and_read_capabilities() {
+        let capabilities = map_scopes_to_capabilities(
+            Platform::YouTube,
+            &default_requested_scopes(Platform::YouTube),
+        );
+        assert!(capabilities.contains(&Capability::UploadVideo));
+        assert!(capabilities.contains(&Capability::ReadMetrics));
+    }
+
+    #[test]
+    fn non_youtube_defaults_remain_identity_only() {
+        for platform in [Platform::TikTok, Platform::Kwai] {
+            let capabilities =
+                map_scopes_to_capabilities(platform, &default_requested_scopes(platform));
+            assert!(!capabilities.contains(&Capability::UploadVideo));
         }
     }
 }

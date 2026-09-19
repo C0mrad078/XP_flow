@@ -57,6 +57,9 @@ callback or a timeout. XP FLOW talks directly to Google's real endpoints
 (`accounts.google.com/o/oauth2/v2/auth`, `oauth2.googleapis.com/token`, `oauth2.googleapis.com/revoke`,
 `openidconnect.googleapis.com/v1/userinfo`, `www.googleapis.com/youtube/v3/channels`) — no broker involvement,
 because Google does not treat an installed app's `client_secret` as confidential.
+The requested scopes are `openid`, profile, `youtube.readonly`, and `youtube.upload`; the upload scope is required
+for a connected account to be usable by XP FLOW's publishing engine. Google OAuth Desktop/Installed App clients are
+supported; the redirect URI is the exact ephemeral loopback URI used for that attempt.
 
 ### TikTok — desktop captures the code, broker exchanges it
 

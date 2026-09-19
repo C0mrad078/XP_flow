@@ -88,9 +88,17 @@ export function useConnectFlow() {
       stopPolling();
       setPlatform(forPlatform);
       setState({ state: "opening_browser" });
-      const id = await begin();
-      setSessionId(id);
-      poll(id);
+      try {
+        const id = await begin();
+        setSessionId(id);
+        poll(id);
+      } catch (error) {
+        const message =
+          typeof error === "object" && error !== null && "user_message" in error
+            ? String((error as { user_message: unknown }).user_message)
+            : "XP FLOW could not start the YouTube connection. Please try again.";
+        setState({ state: "failed", code: "AUTH_START_FAILED", message });
+      }
     },
     [poll, stopPolling],
   );

@@ -142,7 +142,8 @@ cargo build    # Compile
 The desktop app connects a real YouTube account out of the box — it ships with its own Google OAuth Desktop
 client id built in, so no environment setup is needed for YouTube at all. A `YOUTUBE_CLIENT_ID` environment
 override still exists for anyone testing against their own Google Cloud project; no client secret is ever
-required (the desktop flow is PKCE-only). TikTok/Kwai need the separate Auth Broker service running — see
+required (the desktop flow is PKCE-only). The connection requests YouTube read and upload permissions because the
+connected account is also used by the publishing engine; existing read-only grants must be reconnected. TikTok/Kwai need the separate Auth Broker service running — see
 `docs/auth-broker.md` for setup (`services/auth-broker/`, its own `cargo test`/`cargo build`, its own `.env`).
 The Auth Broker is not required to build or run XP FLOW itself; TikTok/Kwai degrade to a clean
 "not configured"/"service unavailable" state instead of failing to start.

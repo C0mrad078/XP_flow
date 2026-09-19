@@ -23,6 +23,7 @@ use crate::services::notification_service::NotificationService;
 struct Flight {
     cancel: Option<oneshot::Sender<()>>,
     state: AuthFlowState,
+    target: (Uuid, Uuid, Platform),
 }
 
 /// How long a finished flight's terminal state stays pollable before its
@@ -121,6 +122,20 @@ impl PlatformAuthService {
             },
         )?;
 
+        {
+            let flights = self.flights.lock().await;
+            if flights
+                .values()
+                .any(|flight| flight.target == (workspace_id, channel_id, platform))
+            {
+                return Err(AuthError::TokenExchangeFailed {
+                    detail:
+                        "a connection attempt is already in progress for this channel and provider"
+                            .into(),
+                });
+            }
+        }
+
         // Mark the target account row `Connecting` immediately so the UI
         // reflects it without waiting for a poll round trip.
         if let Some(account_id) = existing_account_id {
@@ -141,13 +156,25 @@ impl PlatformAuthService {
         let session_id = session.id;
         let (cancel_tx, cancel_rx) = oneshot::channel();
 
-        self.flights.lock().await.insert(
+        let mut flights_guard = self.flights.lock().await;
+        if flights_guard
+            .values()
+            .any(|flight| flight.target == (workspace_id, channel_id, platform))
+        {
+            return Err(AuthError::TokenExchangeFailed {
+                detail: "a connection attempt is already in progress for this channel and provider"
+                    .into(),
+            });
+        }
+        flights_guard.insert(
             session_id,
             Flight {
                 cancel: Some(cancel_tx),
                 state: AuthFlowState::OpeningBrowser,
+                target: (workspace_id, channel_id, platform),
             },
         );
+        drop(flights_guard);
 
         let flights = self.flights.clone();
         let connectors = self.connectors.clone();
