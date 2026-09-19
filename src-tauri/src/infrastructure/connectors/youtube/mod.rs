@@ -5,6 +5,7 @@
 //! (validate/refresh/disconnect/get_profile for an already-connected
 //! account).
 
+pub mod analytics;
 pub mod api_client;
 pub mod auth_provider;
 pub mod config;

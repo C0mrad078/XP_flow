@@ -3,6 +3,7 @@
 //! allowed to write SQL.
 
 mod sqlite_activity_repository;
+mod sqlite_analytics_repository;
 mod sqlite_channel_repository;
 mod sqlite_duplicate_match_repository;
 mod sqlite_hashtag_set_repository;
@@ -24,6 +25,7 @@ mod sqlite_video_source_repository;
 mod sqlite_workspace_repository;
 
 pub use sqlite_activity_repository::SqliteActivityRepository;
+pub use sqlite_analytics_repository::SqliteAnalyticsRepository;
 pub use sqlite_channel_repository::SqliteChannelRepository;
 pub use sqlite_duplicate_match_repository::SqliteDuplicateMatchRepository;
 pub use sqlite_hashtag_set_repository::SqliteHashtagSetRepository;

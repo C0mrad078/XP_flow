@@ -2,6 +2,7 @@
 //! Implementations live in `infrastructure` and `platform` (Rule 4 —
 //! infrastructure may depend on domain abstractions, never the reverse).
 
+pub mod analytics_provider;
 pub mod hashing;
 pub mod media_service;
 pub mod platform_auth_provider;

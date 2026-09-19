@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use application::activity_service::ActivityService;
+use application::analytics_service::AnalyticsService;
 use application::channel_service::ChannelService;
 use application::content_service::ContentService;
 use application::credential_acquisition_service::CredentialAcquisitionService;
@@ -62,14 +63,14 @@ use infrastructure::hashing::{DHashPerceptualHashService, Sha256ContentHashServi
 use infrastructure::media::{FfmpegMediaService, FfmpegThumbnailService, FfprobeMediaProbeService};
 use infrastructure::publishing::{StubPublisher, TauriProgressPublisher};
 use infrastructure::repositories::{
-    SqliteActivityRepository, SqliteChannelRepository, SqliteDuplicateMatchRepository,
-    SqliteHashtagSetRepository, SqliteJobRepository, SqliteMetadataTemplateRepository,
-    SqliteNotificationRepository, SqlitePlatformAccountRepository,
-    SqliteProviderRateStateRepository, SqlitePublicationAttemptRepository,
-    SqlitePublicationConsentRepository, SqlitePublicationRepository, SqliteQueueItemRepository,
-    SqliteScheduleExceptionRepository, SqliteScheduleSlotRepository, SqliteSettingsRepository,
-    SqliteUploadSessionRepository, SqliteVideoRepository, SqliteVideoSourceRepository,
-    SqliteWorkspaceRepository,
+    SqliteActivityRepository, SqliteAnalyticsRepository, SqliteChannelRepository,
+    SqliteDuplicateMatchRepository, SqliteHashtagSetRepository, SqliteJobRepository,
+    SqliteMetadataTemplateRepository, SqliteNotificationRepository,
+    SqlitePlatformAccountRepository, SqliteProviderRateStateRepository,
+    SqlitePublicationAttemptRepository, SqlitePublicationConsentRepository,
+    SqlitePublicationRepository, SqliteQueueItemRepository, SqliteScheduleExceptionRepository,
+    SqliteScheduleSlotRepository, SqliteSettingsRepository, SqliteUploadSessionRepository,
+    SqliteVideoRepository, SqliteVideoSourceRepository, SqliteWorkspaceRepository,
 };
 use infrastructure::watcher::FolderWatcherService;
 use jobs::JobRepository;
@@ -141,6 +142,9 @@ pub fn run() {
             commands::notification_commands::list_recent_notifications,
             commands::notification_commands::unread_notification_count,
             commands::notification_commands::mark_notification_read,
+            commands::analytics_commands::get_analytics_capabilities,
+            commands::analytics_commands::list_publication_analytics,
+            commands::analytics_commands::sync_publication_analytics,
             commands::system_commands::get_app_info,
             commands::system_commands::get_media_status,
             commands::system_commands::get_cache_info,
@@ -260,6 +264,8 @@ async fn bootstrap(
         Arc::new(SqliteWorkspaceRepository::new(pool.clone()));
     let activity_repo: Arc<dyn ActivityRepository> =
         Arc::new(SqliteActivityRepository::new(pool.clone()));
+    let analytics_repo: Arc<dyn crate::domain::ports::repositories::AnalyticsRepository> =
+        Arc::new(SqliteAnalyticsRepository::new(pool.clone()));
     let settings_repo: Arc<dyn SettingsRepository> =
         Arc::new(SqliteSettingsRepository::new(pool.clone()));
     let notification_repo: Arc<dyn NotificationRepository> =
@@ -450,6 +456,12 @@ async fn bootstrap(
     let credential_service = Arc::new(CredentialAcquisitionService::new(
         connectors_for_credentials,
         platform_auth_service.clone(),
+    ));
+    let analytics_service = Arc::new(AnalyticsService::new(
+        analytics_repo,
+        publication_repo.clone(),
+        platform_account_repo.clone(),
+        credential_service.clone(),
     ));
     // Real per-provider `PlatformPublisher` implementations land as each
     // one is built (section 7); until then every platform degrades to a
@@ -642,6 +654,7 @@ async fn bootstrap(
     }
 
     Ok(AppState {
+        analytics_service,
         workspace_service,
         settings_service,
         activity_service,

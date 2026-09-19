@@ -3,6 +3,7 @@
 //! any UI-facing code (Rule 3/4 of the Phase 1 architecture rules).
 
 pub mod activity_event;
+pub mod analytics;
 pub mod app_settings;
 pub mod auth_error;
 pub mod capability;

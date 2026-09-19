@@ -2,12 +2,13 @@
 
 These are production readiness gates. A development phase can be complete while a release gate remains pending. Record real evidence here before changing a gate to **PASSED**; automated adapter tests or a successful build do not substitute for a live provider or native runtime check. Phase 5.2 engineering is complete; the gates below are deferred release validation, not unfinished Phase 5.2 tasks.
 
-| Gate  | Scope                    | Status                         | Evidence                                                                            |
-| ----- | ------------------------ | ------------------------------ | ----------------------------------------------------------------------------------- |
-| RG-01 | Live Google OAuth        | **PENDING RELEASE VALIDATION** | No real account authorization was completed during Phase 5.2.                       |
-| RG-02 | Live YouTube publication | **PENDING RELEASE VALIDATION** | No remote video was created during Phase 5.2.                                       |
-| RG-03 | Native macOS visual QA   | **PENDING RELEASE VALIDATION** | The native app launched, but screen capture and visual inspection were unavailable. |
-| RG-04 | Windows runtime QA       | **PENDING RELEASE VALIDATION** | No Windows runtime or CI evidence was available.                                    |
+| Gate  | Scope                    | Status                         | Evidence                                                                                                |
+| ----- | ------------------------ | ------------------------------ | ------------------------------------------------------------------------------------------------------- |
+| RG-01 | Live Google OAuth        | **PENDING RELEASE VALIDATION** | No real account authorization was completed during Phase 5.2.                                           |
+| RG-02 | Live YouTube publication | **PENDING RELEASE VALIDATION** | No remote video was created during Phase 5.2.                                                           |
+| RG-03 | Native macOS visual QA   | **PENDING RELEASE VALIDATION** | The native app launched, but screen capture and visual inspection were unavailable.                     |
+| RG-04 | Windows runtime QA       | **PENDING RELEASE VALIDATION** | No Windows runtime or CI evidence was available.                                                        |
+| RG-05 | Live provider analytics  | **PENDING RELEASE VALIDATION** | Analytics adapters are covered by automated tests; no credential-backed analytics session has been run. |
 
 ## RG-01 — Live Google OAuth
 

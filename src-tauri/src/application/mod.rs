@@ -3,6 +3,7 @@
 //! the business rules testable without Tauri in the loop.
 
 pub mod activity_service;
+pub mod analytics_service;
 pub mod channel_service;
 pub mod content_service;
 pub mod credential_acquisition_service;

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::application::activity_service::ActivityService;
+use crate::application::analytics_service::AnalyticsService;
 use crate::application::channel_service::ChannelService;
 use crate::application::content_service::ContentService;
 use crate::application::metadata_template_service::MetadataTemplateService;
@@ -34,6 +35,7 @@ use crate::services::notification_service::NotificationService;
 /// file path on every request and doing that through `ContentService`
 /// would pull in duplicate-match/warning computation it doesn't need.
 pub struct AppState {
+    pub analytics_service: Arc<AnalyticsService>,
     pub workspace_service: Arc<WorkspaceService>,
     pub settings_service: Arc<SettingsService>,
     pub activity_service: Arc<ActivityService>,
