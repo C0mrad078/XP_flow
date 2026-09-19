@@ -724,6 +724,11 @@ fn apply_filters(builder: &mut QueryBuilder<Sqlite>, query: &PublicationListQuer
             .push(" AND channel_id = ")
             .push_bind(channel_id.to_string());
     }
+    if let Some(account_id) = query.platform_account_id {
+        builder
+            .push(" AND platform_account_id = ")
+            .push_bind(account_id.to_string());
+    }
     if let Some(platform) = query.platform {
         builder
             .push(" AND platform = ")
@@ -744,10 +749,18 @@ fn apply_filters(builder: &mut QueryBuilder<Sqlite>, query: &PublicationListQuer
             separated.push_unseparated(")");
         }
     }
+    if query.requires_attention {
+        builder.push(" AND (status IN ('failed', 'auth_required', 'rate_limited', 'blocked') OR last_error_code = 'UNKNOWN_REMOTE_RESULT')");
+    }
     if let Some(search) = &query.search {
         if !search.trim().is_empty() {
             let pattern = format!("%{}%", search.trim());
-            builder.push(" AND title LIKE ").push_bind(pattern);
+            builder
+                .push(" AND (title LIKE ")
+                .push_bind(pattern.clone())
+                .push(" OR remote_id LIKE ")
+                .push_bind(pattern)
+                .push(")");
         }
     }
 }

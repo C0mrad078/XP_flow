@@ -51,9 +51,11 @@ export type QueueSort = "queue_order" | "priority_desc" | "newest_first" | "olde
 export interface PublicationListRequest {
   search?: string;
   channel_id?: UUID;
+  platform_account_id?: UUID;
   platform?: Platform;
   priority?: VideoPriority;
   statuses?: PublicationStatus[];
+  requires_attention?: boolean;
   sort?: QueueSort;
   page?: number;
   page_size?: number;

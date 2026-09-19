@@ -18,6 +18,7 @@ import { isFeatureEnabled } from "@/lib/utilities/feature-flags";
 import { toast } from "@/stores/toast-store";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import type { Publication } from "@/types/domain";
+import type { Platform } from "@/types/domain";
 import { deriveConnectionHealth } from "@/types/platform-auth";
 
 import { PublicationDetailsDrawer } from "./publication-details-drawer";
@@ -38,6 +39,11 @@ const FUTURE_VIEW_MODES = [
 export function QueuePage() {
   const [viewMode, setViewMode] = useState<QueueViewMode>("timeline");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [platform, setPlatform] = useState<Platform | "">("");
+  const [channelId, setChannelId] = useState("");
+  const [accountId, setAccountId] = useState("");
+  const [attentionOnly, setAttentionOnly] = useState(false);
   const navigate = useNavigate();
   const timezone = useWorkspaceStore((state) => state.workspace?.timezone ?? "UTC");
 
@@ -63,6 +69,11 @@ export function QueuePage() {
       "paused",
     ],
     page_size: 200,
+    search: search || undefined,
+    platform: platform || undefined,
+    channel_id: channelId || undefined,
+    platform_account_id: accountId || undefined,
+    requires_attention: attentionOnly,
   });
 
   const channelNames = new Map(channels.map((c) => [c.id, c.name]));
@@ -185,6 +196,61 @@ export function QueuePage() {
               </Tooltip>
             ))}
         </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-surface-elevated p-3">
+        <input
+          aria-label="Search publications"
+          className="h-8 min-w-48 flex-1 rounded-md border border-border bg-surface px-2 text-body-small text-foreground"
+          placeholder="Search title or remote ID"
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+        />
+        <select
+          aria-label="Filter platform"
+          className="h-8 rounded-md border border-border bg-surface px-2 text-body-small"
+          value={platform}
+          onChange={(event) => setPlatform(event.target.value as Platform | "")}
+        >
+          <option value="">All platforms</option>
+          <option value="youtube">YouTube</option>
+          <option value="tiktok">TikTok</option>
+          <option value="kwai">Kwai</option>
+        </select>
+        <select
+          aria-label="Filter channel"
+          className="h-8 rounded-md border border-border bg-surface px-2 text-body-small"
+          value={channelId}
+          onChange={(event) => setChannelId(event.target.value)}
+        >
+          <option value="">All channels</option>
+          {channels.map((channel) => (
+            <option key={channel.id} value={channel.id}>
+              {channel.name}
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="Filter account"
+          className="h-8 rounded-md border border-border bg-surface px-2 text-body-small"
+          value={accountId}
+          onChange={(event) => setAccountId(event.target.value)}
+        >
+          <option value="">All accounts</option>
+          {platformAccounts.map((account) => (
+            <option key={account.id} value={account.id}>
+              {account.display_name ?? account.username_or_handle ?? account.platform}
+            </option>
+          ))}
+        </select>
+        <label className="flex items-center gap-2 text-body-small text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={attentionOnly}
+            onChange={(event) => setAttentionOnly(event.target.checked)}
+          />{" "}
+          Requires attention
+        </label>
       </div>
 
       {isLoading && <LoadingState label="Loading queue…" />}

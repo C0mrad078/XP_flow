@@ -14,13 +14,12 @@ import { useChannels } from "@/hooks/use-channels";
 import { useQueueList } from "@/hooks/use-queue";
 import { formatCompactNumber } from "@/lib/formatting/number";
 import { formatRelativeTime, formatTimeInZone } from "@/lib/formatting/date";
-import { mockActivityEvents } from "@/development/mock-data/activity";
 import { mockPlatformOverview, mockViewsSeries } from "@/development/mock-data/dashboard";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import type { ActivityEvent } from "@/types/domain";
 
 export function DashboardPage() {
-  const [activity, setActivity] = useState<ActivityEvent[]>(mockActivityEvents);
+  const [activity, setActivity] = useState<ActivityEvent[]>([]);
   const timezone = useWorkspaceStore((state) => state.workspace?.timezone ?? "UTC");
   const { data: channels = [] } = useChannels();
   const channelNames = new Map(channels.map((c) => [c.id, c.name]));
@@ -39,7 +38,7 @@ export function DashboardPage() {
       "paused",
     ],
     sort: "queue_order",
-    page_size: 4,
+    page_size: 200,
   });
   const upcomingPublications = (queuePage?.items ?? []).filter((p) => p.scheduled_at);
 
@@ -49,12 +48,12 @@ export function DashboardPage() {
       .listRecent(10)
       .then((events) => {
         if (cancelled) return;
-        const merged = [...events, ...mockActivityEvents]
+        const merged = [...events]
           .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
           .slice(0, 6);
         setActivity(merged);
       })
-      .catch(() => setActivity(mockActivityEvents.slice(0, 6)));
+      .catch(() => setActivity([]));
     return () => {
       cancelled = true;
     };
@@ -67,6 +66,7 @@ export function DashboardPage() {
   const needsAttention = publications.filter((p) =>
     ["failed", "rate_limited", "auth_required", "blocked"].includes(p.status),
   ).length;
+  const scheduledToday = publications.filter((p) => p.status === "scheduled" || p.status === "queued").length;
   const publishedToday = publications.filter(
     (p) =>
       p.status === "published" &&
@@ -81,13 +81,7 @@ export function DashboardPage() {
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <Card>
           <CardContent className="p-5">
-            <Metric
-              label="Scheduled posts"
-              value={String(
-                publications.filter((p) => p.status === "scheduled" || p.status === "queued").length,
-              )}
-              icon={ListVideo}
-            />
+            <Metric label="Scheduled posts" value={String(scheduledToday)} icon={ListVideo} />
           </CardContent>
         </Card>
         <Card>
@@ -97,12 +91,12 @@ export function DashboardPage() {
         </Card>
         <Card>
           <CardContent className="p-5">
-            <Metric label="Queued posts" value={String(publishingNow)} icon={Radio} />
+            <Metric label="Uploading / processing" value={String(publishingNow)} icon={Radio} />
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-5">
-            <Metric label="Active channels" value={String(needsAttention)} icon={AlertTriangle} />
+            <Metric label="Needs attention" value={String(needsAttention)} icon={AlertTriangle} />
           </CardContent>
         </Card>
       </div>

@@ -17,9 +17,12 @@ use crate::state::AppState;
 pub struct PublicationListRequest {
     pub search: Option<String>,
     pub channel_id: Option<Uuid>,
+    pub platform_account_id: Option<Uuid>,
     pub platform: Option<Platform>,
     pub priority: Option<VideoPriority>,
     pub statuses: Option<Vec<PublicationStatus>>,
+    #[serde(default)]
+    pub requires_attention: bool,
     pub sort: Option<QueueSort>,
     pub page: Option<i64>,
     pub page_size: Option<i64>,
@@ -29,9 +32,11 @@ fn to_domain_query(workspace_id: Uuid, request: PublicationListRequest) -> Publi
     let mut query = PublicationListQuery::new(workspace_id);
     query.search = request.search;
     query.channel_id = request.channel_id;
+    query.platform_account_id = request.platform_account_id;
     query.platform = request.platform;
     query.priority = request.priority;
     query.statuses = request.statuses;
+    query.requires_attention = request.requires_attention;
     query.sort = request.sort.unwrap_or(QueueSort::QueueOrder);
     query.page = request.page.unwrap_or(0).max(0);
     query.page_size = request.page_size.unwrap_or(60).clamp(1, 500);
