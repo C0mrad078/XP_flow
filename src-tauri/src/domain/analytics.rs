@@ -48,3 +48,13 @@ pub struct ChannelMetricSnapshot {
     pub availability: AnalyticsAvailability,
     pub error_code: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalyticsSyncState {
+    pub platform_account_id: Uuid,
+    pub provider: Platform,
+    pub last_attempted_at: Option<DateTime<Utc>>,
+    pub last_successful_at: Option<DateTime<Utc>>,
+    pub next_allowed_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+}

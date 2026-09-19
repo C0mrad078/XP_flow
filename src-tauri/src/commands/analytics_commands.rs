@@ -34,3 +34,14 @@ pub async fn sync_publication_analytics(
         .sync_publication(publication_id)
         .await?)
 }
+
+#[tauri::command]
+pub async fn sync_workspace_analytics(
+    state: State<'_, AppState>,
+    workspace_id: Uuid,
+) -> Result<usize, AppError> {
+    Ok(state
+        .analytics_service
+        .sync_workspace(workspace_id, 20)
+        .await?)
+}

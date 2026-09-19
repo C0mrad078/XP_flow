@@ -219,6 +219,30 @@ impl JobRunner {
         });
     }
 
+    /// Bounded provider analytics refresh using the existing JobRunner
+    /// lifecycle. Analytics remains independent from publishing workers.
+    pub fn spawn_periodic_analytics_sync(
+        self: Arc<Self>,
+        analytics: Arc<crate::application::analytics_service::AnalyticsService>,
+        workspace_id: Uuid,
+        interval: Duration,
+    ) {
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                match analytics.sync_workspace(workspace_id, 20).await {
+                    Ok(synced) if synced > 0 => {
+                        tracing::info!(synced, "analytics refresh completed")
+                    }
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(%error, "analytics refresh failed"),
+                }
+            }
+        });
+    }
+
     // ---------------------------------------------------------------
     // Publishing engine (Phase 5, section 14/85/122) — same "reuse
     // JobRunner, don't build a second worker system" discipline as the

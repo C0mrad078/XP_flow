@@ -4,7 +4,7 @@ use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
 use crate::domain::analytics::{
-    AnalyticsAvailability, ChannelMetricSnapshot, PublicationMetricSnapshot,
+    AnalyticsAvailability, AnalyticsSyncState, ChannelMetricSnapshot, PublicationMetricSnapshot,
 };
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::platform::Platform;
@@ -105,5 +105,46 @@ impl AnalyticsRepository for SqliteAnalyticsRepository {
                 })
             })
             .collect()
+    }
+
+    async fn get_sync_state(
+        &self,
+        platform_account_id: Uuid,
+    ) -> DomainResult<Option<AnalyticsSyncState>> {
+        let row = sqlx::query("SELECT platform_account_id, provider, last_attempted_at, last_successful_at, next_allowed_at, last_error FROM analytics_sync_state WHERE platform_account_id = ?")
+            .bind(platform_account_id.to_string()).fetch_optional(&self.pool).await.map_err(err)?;
+        row.map(|r| {
+            Ok(AnalyticsSyncState {
+                platform_account_id,
+                provider: r
+                    .try_get::<String, _>("provider")
+                    .map_err(err)?
+                    .parse::<Platform>()
+                    .map_err(DomainError::Validation)?,
+                last_attempted_at: r
+                    .try_get::<Option<String>, _>("last_attempted_at")
+                    .map_err(err)?
+                    .map(dt),
+                last_successful_at: r
+                    .try_get::<Option<String>, _>("last_successful_at")
+                    .map_err(err)?
+                    .map(dt),
+                next_allowed_at: r
+                    .try_get::<Option<String>, _>("next_allowed_at")
+                    .map_err(err)?
+                    .map(dt),
+                last_error: r.try_get("last_error").map_err(err)?,
+            })
+        })
+        .transpose()
+    }
+
+    async fn upsert_sync_state(&self, state: &AnalyticsSyncState) -> DomainResult<()> {
+        sqlx::query("INSERT INTO analytics_sync_state (platform_account_id, provider, last_attempted_at, last_successful_at, next_allowed_at, last_error) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(platform_account_id) DO UPDATE SET provider = excluded.provider, last_attempted_at = excluded.last_attempted_at, last_successful_at = excluded.last_successful_at, next_allowed_at = excluded.next_allowed_at, last_error = excluded.last_error")
+            .bind(state.platform_account_id.to_string()).bind(state.provider.as_str())
+            .bind(state.last_attempted_at.map(|v| v.to_rfc3339())).bind(state.last_successful_at.map(|v| v.to_rfc3339()))
+            .bind(state.next_allowed_at.map(|v| v.to_rfc3339())).bind(&state.last_error)
+            .execute(&self.pool).await.map_err(err)?;
+        Ok(())
     }
 }

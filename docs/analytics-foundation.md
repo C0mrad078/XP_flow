@@ -16,7 +16,7 @@ TikTok and Kwai report an explicit unsupported capability result because the cur
 
 ## Synchronization
 
-The Analytics service provides persisted publication snapshots and a manual publication refresh command. Refresh uses the existing credential acquisition path, so token refresh and provider authentication remain centralized. Analytics failures are returned independently of publication state. Background synchronization and channel-level provider refresh are future extensions; no polling loop is enabled by this foundation.
+The Analytics service provides persisted publication snapshots, per-account sync state, a manual refresh command, and a centralized 15-minute background sweep. The sweep is bounded to 20 recent published items per supported account, skips unsupported/disconnected or rate-limited accounts, and runs independently of publishing workers. Refresh uses the existing credential acquisition path, so token refresh and provider authentication remain centralized. Analytics failures are returned independently of publication state. Channel-level provider refresh remains a future extension.
 
 The UI shows the latest persisted capture time, unavailable metrics and a per-publication Refresh action. Cached values are not presented as live data.
 

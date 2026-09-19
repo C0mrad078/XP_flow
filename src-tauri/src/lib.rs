@@ -99,6 +99,9 @@ const PUBLISH_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 /// Section 125: processing polls are cheap reads, but still bounded —
 /// nowhere near "every second for hours."
 const PROCESSING_POLL_INTERVAL: Duration = Duration::from_secs(60);
+/// Analytics refresh is deliberately much slower than publishing scans and
+/// is centrally bounded by AnalyticsService.
+const ANALYTICS_SYNC_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// Section 79/131: a conservative default until Settings → Publishing
 /// exposes this as a real, user-configurable knob.
 const DEFAULT_MAX_CONCURRENT_UPLOADS: usize = 2;
@@ -145,6 +148,7 @@ pub fn run() {
             commands::analytics_commands::get_analytics_capabilities,
             commands::analytics_commands::list_publication_analytics,
             commands::analytics_commands::sync_publication_analytics,
+            commands::analytics_commands::sync_workspace_analytics,
             commands::system_commands::get_app_info,
             commands::system_commands::get_media_status,
             commands::system_commands::get_cache_info,
@@ -457,12 +461,6 @@ async fn bootstrap(
         connectors_for_credentials,
         platform_auth_service.clone(),
     ));
-    let analytics_service = Arc::new(AnalyticsService::new(
-        analytics_repo,
-        publication_repo.clone(),
-        platform_account_repo.clone(),
-        credential_service.clone(),
-    ));
     // Real per-provider `PlatformPublisher` implementations land as each
     // one is built (section 7); until then every platform degrades to a
     // clear `PlatformNotApproved` instead of crashing or silently doing
@@ -509,6 +507,13 @@ async fn bootstrap(
     let provider_rate_limit_service = Arc::new(ProviderRateLimitService::new(Arc::new(
         SqliteProviderRateStateRepository::new(pool.clone()),
     )));
+    let analytics_service = Arc::new(AnalyticsService::new(
+        analytics_repo,
+        publication_repo.clone(),
+        platform_account_repo.clone(),
+        credential_service.clone(),
+        provider_rate_limit_service.clone(),
+    ));
     let provider_configuration_health_service = Arc::new(ProviderConfigurationHealthService::new(
         tiktok_config.is_some(),
         broker_client.clone(),
@@ -607,6 +612,11 @@ async fn bootstrap(
         job_runner.clone().spawn_periodic_token_refresh(
             token_lifecycle_service.clone(),
             TOKEN_REFRESH_SWEEP_INTERVAL,
+        );
+        job_runner.clone().spawn_periodic_analytics_sync(
+            analytics_service.clone(),
+            workspace.id,
+            ANALYTICS_SYNC_INTERVAL,
         );
 
         // Section 88/123: reconcile any claim abandoned by a process that

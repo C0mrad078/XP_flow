@@ -1,4 +1,5 @@
 import { BarChart3, RefreshCcw } from "lucide-react";
+import { useState } from "react";
 import { PageContainer } from "@/components/common/page-container";
 import { PageHeader } from "@/components/common/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,11 +10,12 @@ import {
   useAnalyticsCapabilities,
   usePublicationAnalytics,
   useSyncPublicationAnalytics,
+  useSyncWorkspaceAnalytics,
 } from "@/hooks/use-analytics";
 import type { Platform, Publication } from "@/types/domain";
 
-function PublishedRow({ publication }: { publication: Publication }) {
-  const metrics = usePublicationAnalytics(publication.id);
+function PublishedRow({ publication, days }: { publication: Publication; days: number }) {
+  const metrics = usePublicationAnalytics(publication.id, days);
   const sync = useSyncPublicationAnalytics();
   const latest = metrics.data?.[metrics.data.length - 1];
   return (
@@ -43,13 +45,15 @@ function PublishedRow({ publication }: { publication: Publication }) {
 }
 
 export function AnalyticsPage() {
-  const {
-    data: page,
-    isLoading,
-    refetch,
-  } = useQueueList({ statuses: ["published"], sort: "newest_first", page_size: 20 });
+  const { data: page, isLoading } = useQueueList({
+    statuses: ["published"],
+    sort: "newest_first",
+    page_size: 20,
+  });
   const platform = (page?.items?.[0]?.platform ?? "youtube") as Platform;
   const capabilities = useAnalyticsCapabilities(platform);
+  const workspaceSync = useSyncWorkspaceAnalytics();
+  const [days, setDays] = useState(30);
   const publications = page?.items ?? [];
   return (
     <PageContainer>
@@ -57,10 +61,27 @@ export function AnalyticsPage() {
         title="Analytics"
         description="Persisted provider metrics and XP FLOW publication performance."
         actions={
-          <Button variant="outline" size="sm" onClick={() => refetch()}>
-            <RefreshCcw className="size-3.5" />
-            Refresh
-          </Button>
+          <div className="flex items-center gap-2">
+            <select
+              aria-label="Analytics range"
+              className="h-8 rounded-md border border-border bg-background px-2 text-body-small"
+              value={days}
+              onChange={(event) => setDays(Number(event.target.value))}
+            >
+              <option value={7}>7 days</option>
+              <option value={30}>30 days</option>
+              <option value={90}>90 days</option>
+            </select>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => workspaceSync.mutate()}
+              disabled={workspaceSync.isPending}
+            >
+              <RefreshCcw className="size-3.5" />
+              {workspaceSync.isPending ? "Refreshing…" : "Refresh"}
+            </Button>
+          </div>
         }
       />
       <Card>
@@ -90,7 +111,7 @@ export function AnalyticsPage() {
           </CardHeader>
           <CardContent>
             {publications.map((publication) => (
-              <PublishedRow key={publication.id} publication={publication} />
+              <PublishedRow key={publication.id} publication={publication} days={days} />
             ))}
           </CardContent>
         </Card>

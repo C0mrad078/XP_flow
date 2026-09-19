@@ -23,3 +23,12 @@ CREATE TABLE channel_metric_snapshots (
     error_code TEXT
 );
 CREATE INDEX idx_channel_metrics_range ON channel_metric_snapshots(channel_id, captured_at);
+
+CREATE TABLE analytics_sync_state (
+    platform_account_id TEXT PRIMARY KEY NOT NULL REFERENCES platform_accounts(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    last_attempted_at TEXT,
+    last_successful_at TEXT,
+    next_allowed_at TEXT,
+    last_error TEXT
+);

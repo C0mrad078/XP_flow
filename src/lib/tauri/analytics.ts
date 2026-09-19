@@ -27,4 +27,5 @@ export const analyticsApi = {
     invoke<PublicationMetricSnapshot[]>("list_publication_analytics", { publicationId, days }),
   syncPublication: (publicationId: UUID) =>
     invoke<PublicationMetricSnapshot>("sync_publication_analytics", { publicationId }),
+  syncWorkspace: (workspaceId: UUID) => invoke<number>("sync_workspace_analytics", { workspaceId }),
 };

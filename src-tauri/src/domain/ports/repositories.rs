@@ -3,7 +3,9 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::domain::activity_event::ActivityEvent;
-use crate::domain::analytics::{ChannelMetricSnapshot, PublicationMetricSnapshot};
+use crate::domain::analytics::{
+    AnalyticsSyncState, ChannelMetricSnapshot, PublicationMetricSnapshot,
+};
 use crate::domain::app_settings::AppSettings;
 use crate::domain::channel::Channel;
 use crate::domain::duplicate_match::DuplicateMatch;
@@ -505,4 +507,9 @@ pub trait AnalyticsRepository: Send + Sync {
         from: DateTime<Utc>,
         to: DateTime<Utc>,
     ) -> DomainResult<Vec<ChannelMetricSnapshot>>;
+    async fn get_sync_state(
+        &self,
+        platform_account_id: Uuid,
+    ) -> DomainResult<Option<AnalyticsSyncState>>;
+    async fn upsert_sync_state(&self, state: &AnalyticsSyncState) -> DomainResult<()>;
 }
