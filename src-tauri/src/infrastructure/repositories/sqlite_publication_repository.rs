@@ -33,6 +33,10 @@ fn row_to_publication(row: &sqlx::sqlite::SqliteRow) -> Result<Publication, Doma
     let scheduled_at: Option<String> = row.try_get("scheduled_at").map_err(map_repo_err)?;
     let published_at: Option<String> = row.try_get("published_at").map_err(map_repo_err)?;
     let execution_key: Option<String> = row.try_get("execution_key").map_err(map_repo_err)?;
+    let repost_of_publication_id: Option<String> = row
+        .try_get("repost_of_publication_id")
+        .map_err(map_repo_err)?;
+    let reconciled_at: Option<String> = row.try_get("reconciled_at").map_err(map_repo_err)?;
     let lease_expires_at: Option<String> = row.try_get("lease_expires_at").map_err(map_repo_err)?;
     let rendered_metadata_json: Option<String> = row
         .try_get("rendered_metadata_json")
@@ -101,6 +105,9 @@ fn row_to_publication(row: &sqlx::sqlite::SqliteRow) -> Result<Publication, Doma
         last_error: row.try_get("last_error").map_err(map_repo_err)?,
         last_error_code: row.try_get("last_error_code").map_err(map_repo_err)?,
         execution_key: execution_key.and_then(|s| Uuid::parse_str(&s).ok()),
+        repost_of_publication_id: repost_of_publication_id.and_then(|s| Uuid::parse_str(&s).ok()),
+        reconciliation_result: row.try_get("reconciliation_result").map_err(map_repo_err)?,
+        reconciled_at: reconciled_at.map(|s| parse_dt(&s)),
         claim_token: row.try_get("claim_token").map_err(map_repo_err)?,
         lease_expires_at: lease_expires_at.map(|s| parse_dt(&s)),
         rendered_metadata: rendered_metadata_json.and_then(|json| serde_json::from_str(&json).ok()),
@@ -118,20 +125,64 @@ fn row_to_publication(row: &sqlx::sqlite::SqliteRow) -> Result<Publication, Doma
 
 const SELECT_COLUMNS: &str = "id, workspace_id, video_id, channel_id, platform_account_id, platform, status, title, \
      description, hashtags_json, priority, locked, scheduled_at, published_at, remote_id, retry_count, last_error, \
-     last_error_code, execution_key, claim_token, lease_expires_at, rendered_metadata_json, title_override, \
+     last_error_code, execution_key, repost_of_publication_id, reconciliation_result, reconciled_at, claim_token, lease_expires_at, rendered_metadata_json, title_override, \
      description_override, hashtags_override, title_template_id, description_template_id, hashtag_set_id, \
      provider_options_override, created_at, updated_at";
 
 #[async_trait]
 impl PublicationRepository for SqlitePublicationRepository {
+    async fn try_begin_reconciliation(
+        &self,
+        id: Uuid,
+        token: &str,
+        stale_before: DateTime<Utc>,
+    ) -> DomainResult<bool> {
+        let result = sqlx::query(
+            "UPDATE publications SET reconciliation_token = ?, reconciliation_started_at = ?, updated_at = ? \
+             WHERE id = ? AND status = 'failed' AND last_error_code = 'UNKNOWN_REMOTE_RESULT' \
+             AND (reconciliation_token IS NULL OR reconciliation_started_at < ?)"
+        )
+        .bind(token)
+        .bind(Utc::now().to_rfc3339())
+        .bind(Utc::now().to_rfc3339())
+        .bind(id.to_string())
+        .bind(stale_before.to_rfc3339())
+        .execute(&self.pool).await.map_err(map_repo_err)?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn finish_reconciliation(
+        &self,
+        id: Uuid,
+        token: &str,
+        status: PublicationStatus,
+        remote_id: Option<String>,
+        result: &str,
+        last_error_code: Option<&str>,
+    ) -> DomainResult<bool> {
+        let now = Utc::now().to_rfc3339();
+        let updated = sqlx::query(
+            "UPDATE publications SET status = ?, remote_id = COALESCE(?, remote_id), \
+             reconciliation_result = ?, reconciled_at = ?, reconciliation_token = NULL, \
+             reconciliation_started_at = NULL, last_error_code = ?, \
+             last_error = CASE WHEN ? IN ('published', 'processing') THEN NULL ELSE last_error END, \
+             published_at = CASE WHEN ? = 'published' THEN ? ELSE published_at END, updated_at = ? \
+             WHERE id = ? AND reconciliation_token = ? AND status = 'failed' AND last_error_code = 'UNKNOWN_REMOTE_RESULT'"
+        )
+        .bind(status.as_str()).bind(remote_id).bind(result).bind(&now)
+        .bind(last_error_code).bind(status.as_str()).bind(status.as_str()).bind(&now).bind(&now)
+        .bind(id.to_string()).bind(token).execute(&self.pool).await.map_err(map_repo_err)?;
+        Ok(updated.rows_affected() == 1)
+    }
+
     async fn create(&self, publication: &Publication) -> DomainResult<()> {
         sqlx::query(
             "INSERT INTO publications (id, workspace_id, video_id, channel_id, platform_account_id, platform, status, title, \
              description, hashtags_json, priority, locked, scheduled_at, published_at, remote_id, retry_count, last_error, \
-             last_error_code, execution_key, claim_token, lease_expires_at, rendered_metadata_json, title_override, \
+             last_error_code, execution_key, repost_of_publication_id, reconciliation_result, reconciled_at, claim_token, lease_expires_at, rendered_metadata_json, title_override, \
              description_override, hashtags_override, title_template_id, description_template_id, hashtag_set_id, \
              provider_options_override, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(publication.id.to_string())
         .bind(publication.workspace_id.to_string())
@@ -152,6 +203,9 @@ impl PublicationRepository for SqlitePublicationRepository {
         .bind(&publication.last_error)
         .bind(&publication.last_error_code)
         .bind(publication.execution_key.map(|id| id.to_string()))
+        .bind(publication.repost_of_publication_id.map(|id| id.to_string()))
+        .bind(&publication.reconciliation_result)
+        .bind(publication.reconciled_at.map(|dt| dt.to_rfc3339()))
         .bind(&publication.claim_token)
         .bind(publication.lease_expires_at.map(|dt| dt.to_rfc3339()))
         .bind(
@@ -1211,6 +1265,107 @@ mod tests {
         assert!(
             reloaded.metadata_overrides.title_template_id.is_none(),
             "ON DELETE SET NULL should have cleared the dangling pin"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconciliation_lease_is_single_owner_and_terminal_update_is_idempotent() {
+        let pool = temp_pool("pub-reconcile-lease").await;
+        let (workspace, source) = seed_workspace_and_source(&pool).await;
+        let channel = seed_channel(&pool, workspace, "Channel").await;
+        let video = seed_video(&pool, workspace, source, Some(channel), "video").await;
+        let mut publication =
+            seed_scheduled_publication(&pool, workspace, channel, video, Utc::now()).await;
+        publication.status = PublicationStatus::Failed;
+        publication.last_error_code = Some("UNKNOWN_REMOTE_RESULT".into());
+        let repo = SqlitePublicationRepository::new(pool);
+        repo.update(&publication).await.unwrap();
+        let stale = Utc::now() - chrono::Duration::minutes(10);
+        assert!(repo
+            .try_begin_reconciliation(publication.id, "owner", stale)
+            .await
+            .unwrap());
+        assert!(!repo
+            .try_begin_reconciliation(publication.id, "other", stale)
+            .await
+            .unwrap());
+        assert!(!repo
+            .finish_reconciliation(
+                publication.id,
+                "other",
+                PublicationStatus::Published,
+                Some("wrong".into()),
+                "remote_confirmed",
+                None
+            )
+            .await
+            .unwrap());
+        assert!(repo
+            .finish_reconciliation(
+                publication.id,
+                "owner",
+                PublicationStatus::Published,
+                Some("video-1".into()),
+                "remote_confirmed",
+                None
+            )
+            .await
+            .unwrap());
+        assert!(!repo
+            .finish_reconciliation(
+                publication.id,
+                "owner",
+                PublicationStatus::Published,
+                Some("video-2".into()),
+                "remote_confirmed",
+                None
+            )
+            .await
+            .unwrap());
+        let saved = repo.get(publication.id).await.unwrap().unwrap();
+        assert_eq!(saved.remote_id.as_deref(), Some("video-1"));
+        assert_eq!(saved.status, PublicationStatus::Published);
+    }
+
+    #[tokio::test]
+    async fn repost_has_new_execution_and_unique_source_without_changing_original() {
+        let pool = temp_pool("pub-repost-unique").await;
+        let (workspace, source) = seed_workspace_and_source(&pool).await;
+        let channel = seed_channel(&pool, workspace, "Channel").await;
+        let video = seed_video(&pool, workspace, source, Some(channel), "video").await;
+        let repo = SqlitePublicationRepository::new(pool);
+        let mut original = Publication::new(
+            workspace,
+            video,
+            channel,
+            Platform::YouTube,
+            "Original",
+            VideoPriority::Normal,
+        );
+        original.status = PublicationStatus::Published;
+        original.execution_key = Some(Uuid::new_v4());
+        original.remote_id = Some("remote-original".into());
+        repo.create(&original).await.unwrap();
+        let mut repost = original.clone();
+        repost.id = Uuid::new_v4();
+        repost.execution_key = Some(Uuid::new_v4());
+        repost.repost_of_publication_id = Some(original.id);
+        repost.remote_id = None;
+        repost.status = PublicationStatus::Queued;
+        repo.create(&repost).await.unwrap();
+        assert!(repo.create(&repost).await.is_err());
+        let mut second = repost.clone();
+        second.id = Uuid::new_v4();
+        assert!(repo.create(&second).await.is_err());
+        assert_ne!(original.execution_key, repost.execution_key);
+        assert_eq!(
+            repo.get(original.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .remote_id
+                .as_deref(),
+            Some("remote-original")
         );
     }
 }

@@ -257,6 +257,18 @@ impl PublishingEngineService {
     /// scan, so it gets the same exactly-once guarantee — this is never a
     /// separate, parallel execution path.
     pub async fn publish_now(&self, publication_id: Uuid) -> Result<(), PublishError> {
+        self.publish_now_inner(publication_id, false).await
+    }
+
+    pub async fn retry_publication(&self, publication_id: Uuid) -> Result<(), PublishError> {
+        self.publish_now_inner(publication_id, true).await
+    }
+
+    async fn publish_now_inner(
+        &self,
+        publication_id: Uuid,
+        retry: bool,
+    ) -> Result<(), PublishError> {
         // Section 58: a global pause is a hard stop — "Publish Now" is
         // not a backdoor around it. Resume first, then publish.
         let publishing_settings = self
@@ -289,6 +301,40 @@ impl PublishingEngineService {
         }
         if publication.last_error_code.as_deref() == Some("UNKNOWN_REMOTE_RESULT") {
             return Err(PublishError::UnknownRemoteResult);
+        }
+        if retry {
+            if !matches!(
+                publication.status,
+                PublicationStatus::Failed | PublicationStatus::RateLimited
+            ) {
+                return Err(PublishError::Internal {
+                    detail: "publication is not retryable".into(),
+                });
+            }
+            if publication.scheduled_at.is_some_and(|at| at > Utc::now()) {
+                return Err(PublishError::Internal {
+                    detail: "retry backoff has not elapsed".into(),
+                });
+            }
+            if let Some(session) = self
+                .session_repo
+                .latest_for_publication(publication_id)
+                .await
+                .map_err(|e| PublishError::Internal {
+                    detail: e.to_string(),
+                })?
+            {
+                if session.remote_publish_id.is_some() || !session.state.safe_to_restart() {
+                    return Err(PublishError::UnknownRemoteResult);
+                }
+            }
+        } else if matches!(
+            publication.status,
+            PublicationStatus::Failed | PublicationStatus::RateLimited
+        ) {
+            return Err(PublishError::Internal {
+                detail: "use Retry for the existing execution".into(),
+            });
         }
         match self.channel_repo.get(publication.channel_id).await {
             Ok(Some(channel)) if channel.status == ChannelStatus::Paused => {
@@ -345,6 +391,239 @@ impl PublishingEngineService {
             .list_for_publication(publication_id)
             .await
             .unwrap_or_default()
+    }
+
+    /// Operator reconciliation only reads provider state. It never calls
+    /// initialize, upload, finalize, or recover_upload (which may send bytes).
+    pub async fn reconcile_publication(
+        &self,
+        publication_id: Uuid,
+    ) -> Result<String, PublishError> {
+        let publication = self
+            .publication_repo
+            .get(publication_id)
+            .await
+            .map_err(|e| PublishError::Internal {
+                detail: e.to_string(),
+            })?
+            .ok_or_else(|| PublishError::Internal {
+                detail: "publication not found".into(),
+            })?;
+        if publication.status != PublicationStatus::Failed
+            || publication.last_error_code.as_deref() != Some("UNKNOWN_REMOTE_RESULT")
+        {
+            return Err(PublishError::Internal {
+                detail: "publication does not require reconciliation".into(),
+            });
+        }
+        let token = Uuid::new_v4().to_string();
+        let claimed = self
+            .publication_repo
+            .try_begin_reconciliation(publication_id, &token, Utc::now() - Duration::minutes(10))
+            .await
+            .map_err(|e| PublishError::Internal {
+                detail: e.to_string(),
+            })?;
+        if !claimed {
+            return Err(PublishError::Internal {
+                detail: "reconciliation is already running".into(),
+            });
+        }
+
+        let outcome = self.inspect_remote_for_reconciliation(&publication).await;
+        let (session, result) = match outcome {
+            Ok(value) => value,
+            Err(err) => {
+                let _ = self
+                    .publication_repo
+                    .finish_reconciliation(
+                        publication_id,
+                        &token,
+                        PublicationStatus::Failed,
+                        None,
+                        "still_ambiguous",
+                        Some("UNKNOWN_REMOTE_RESULT"),
+                    )
+                    .await;
+                return Err(err);
+            }
+        };
+        let (status, code) = match session.as_ref().map(|s| s.state) {
+            Some(RemoteUploadState::RemoteSucceeded) => (PublicationStatus::Published, None),
+            Some(RemoteUploadState::RemoteProcessing) => (PublicationStatus::Processing, None),
+            // A partial session is useful evidence but does not prove
+            // that no remote object can exist after the last request.
+            _ => (PublicationStatus::Failed, Some("UNKNOWN_REMOTE_RESULT")),
+        };
+        if let Some(ref session) = session {
+            self.session_repo
+                .update(session)
+                .await
+                .map_err(|e| PublishError::Internal {
+                    detail: e.to_string(),
+                })?;
+        }
+        let remote_id = session.as_ref().and_then(|s| s.remote_publish_id.clone());
+        let finished = self
+            .publication_repo
+            .finish_reconciliation(publication_id, &token, status, remote_id, result, code)
+            .await
+            .map_err(|e| PublishError::Internal {
+                detail: e.to_string(),
+            })?;
+        if !finished {
+            return Err(PublishError::Internal {
+                detail: "reconciliation lease was lost".into(),
+            });
+        }
+        if status == PublicationStatus::Published {
+            if let Some(ref session) = session {
+                self.finish_processing_attempt(session, None).await?;
+            }
+        }
+        Ok(result.to_string())
+    }
+
+    /// A repost is a separate row and execution, linked to its source.
+    /// The original row, attempts, sessions, and remote ID are untouched.
+    pub async fn create_repost(&self, source_id: Uuid) -> Result<Publication, PublishError> {
+        let source = self
+            .publication_repo
+            .get(source_id)
+            .await
+            .map_err(|e| PublishError::Internal {
+                detail: e.to_string(),
+            })?
+            .ok_or_else(|| PublishError::Internal {
+                detail: "publication not found".into(),
+            })?;
+        if !matches!(
+            source.status,
+            PublicationStatus::Published | PublicationStatus::Failed
+        ) {
+            return Err(PublishError::Internal {
+                detail: "only completed or failed publications can be reposted".into(),
+            });
+        }
+        let now = Utc::now();
+        let mut repost = source.clone();
+        repost.id = Uuid::new_v4();
+        repost.repost_of_publication_id = Some(source.id);
+        repost.execution_key = Some(Uuid::new_v4());
+        repost.status = PublicationStatus::Queued;
+        repost.scheduled_at = None;
+        repost.published_at = None;
+        repost.remote_id = None;
+        repost.retry_count = 0;
+        repost.last_error = None;
+        repost.last_error_code = None;
+        repost.reconciliation_result = None;
+        repost.reconciled_at = None;
+        repost.claim_token = None;
+        repost.lease_expires_at = None;
+        repost.rendered_metadata = None;
+        repost.created_at = now;
+        repost.updated_at = now;
+        // A unique source index is the final guard against two concurrent
+        // requests creating two new executions from one source.
+        self.publication_repo
+            .create(&repost)
+            .await
+            .map_err(|e| PublishError::Internal {
+                detail: e.to_string(),
+            })?;
+        let _ = self
+            .activity_service
+            .log(
+                ActivityCategory::Publication,
+                ActivityLevel::Info,
+                format!(
+                    "Repost queued for publication {} as {}",
+                    source.id, repost.id
+                ),
+            )
+            .await;
+        Ok(repost)
+    }
+
+    async fn inspect_remote_for_reconciliation(
+        &self,
+        publication: &Publication,
+    ) -> Result<
+        (
+            Option<crate::domain::publishing::UploadSession>,
+            &'static str,
+        ),
+        PublishError,
+    > {
+        let Some(mut session) = self
+            .session_repo
+            .latest_for_publication(publication.id)
+            .await
+            .map_err(|e| PublishError::Internal {
+                detail: e.to_string(),
+            })?
+        else {
+            return Ok((None, "still_ambiguous"));
+        };
+        if session.remote_publish_id.is_none() {
+            session.remote_publish_id = publication.remote_id.clone();
+        }
+        let Some(account_id) = publication.platform_account_id else {
+            return Ok((Some(session), "authentication_required"));
+        };
+        let Some(account) = self
+            .platform_account_repo
+            .get(account_id)
+            .await
+            .map_err(|e| PublishError::Internal {
+                detail: e.to_string(),
+            })?
+        else {
+            return Ok((Some(session), "authentication_required"));
+        };
+        if !self
+            .rate_limit_service
+            .can_execute(account.id, RateLimitOperation::Status)
+            .await
+        {
+            return Ok((Some(session), "rate_limited"));
+        }
+        let Some(publisher) = self.publishers.get(&publication.platform) else {
+            return Ok((Some(session), "unsupported_provider"));
+        };
+        let access_token = self.credential_service.acquire(&account).await?;
+        let result = publisher.reconcile_remote(&access_token, &session).await;
+        let session = match result {
+            Ok(session) => session,
+            Err(PublishError::RateLimited {
+                retry_after_seconds,
+            }) => {
+                let _ = self
+                    .rate_limit_service
+                    .record_rate_limited(
+                        account.id,
+                        RateLimitOperation::Status,
+                        retry_after_seconds,
+                    )
+                    .await;
+                return Err(PublishError::RateLimited {
+                    retry_after_seconds,
+                });
+            }
+            Err(err) => return Err(err),
+        };
+        let _ = self
+            .rate_limit_service
+            .record_success(account.id, RateLimitOperation::Status)
+            .await;
+        let label = match session.state {
+            RemoteUploadState::RemoteSucceeded => "remote_confirmed",
+            RemoteUploadState::RemoteProcessing => "provider_processing",
+            RemoteUploadState::Transferring => "upload_incomplete",
+            _ => "still_ambiguous",
+        };
+        Ok((Some(session), label))
     }
 
     /// Records explicit user approval of the publication's *current*
@@ -653,8 +932,26 @@ impl PublishingEngineService {
         let progress_publication_id = publication_id;
         let progress_attempt_id = attempt.id;
         let progress_platform = publication.platform;
-        tokio::spawn(async move {
+        let progress_session_id = session.id;
+        let checkpoint_repo = self.session_repo.clone();
+        let progress_task = tokio::spawn(async move {
+            let mut last_checkpoint = 0_i64;
+            let mut last_checkpoint_at = tokio::time::Instant::now();
             while let Some(update) = progress_rx.recv().await {
+                // Provider acknowledgements only. Bound SQLite writes to
+                // 16 MiB or 30 seconds, with a final checkpoint on close.
+                let due = update.bytes_uploaded - last_checkpoint >= 16 * 1024 * 1024
+                    || last_checkpoint_at.elapsed() >= std::time::Duration::from_secs(30);
+                if due
+                    && update.bytes_uploaded > last_checkpoint
+                    && checkpoint_repo
+                        .checkpoint_bytes(progress_session_id, update.bytes_uploaded)
+                        .await
+                        .is_ok()
+                {
+                    last_checkpoint = update.bytes_uploaded;
+                    last_checkpoint_at = tokio::time::Instant::now();
+                }
                 let percentage = update.bytes_total.and_then(|total| {
                     if total > 0 {
                         Some((update.bytes_uploaded as f64 / total as f64) * 100.0)
@@ -674,6 +971,7 @@ impl PublishingEngineService {
                     },
                 );
             }
+            // The final session update below is the authoritative close.
         });
 
         let (updated_session, upload_result) = publisher
@@ -685,6 +983,7 @@ impl PublishingEngineService {
                 CancelSignal::new(),
             )
             .await;
+        let _ = progress_task.await;
         session = updated_session;
         self.session_repo
             .update(&session)

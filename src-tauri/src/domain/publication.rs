@@ -200,6 +200,12 @@ pub struct Publication {
     /// instead (section 3), so "same execution key" is exactly XP FLOW's
     /// definition of "the same logical remote write."
     pub execution_key: Option<Uuid>,
+    /// The prior publication deliberately reposted to create this one.
+    /// One direct child per source makes repeated clicks idempotent; another
+    /// intentional repost can be made from that child.
+    pub repost_of_publication_id: Option<Uuid>,
+    pub reconciliation_result: Option<String>,
+    pub reconciled_at: Option<DateTime<Utc>>,
     /// Section 13 — proves current ownership of an active claim; cleared
     /// whenever the publication leaves `Uploading`/`Processing`.
     pub claim_token: Option<String>,
@@ -249,6 +255,9 @@ impl Publication {
             last_error: None,
             last_error_code: None,
             execution_key: None,
+            repost_of_publication_id: None,
+            reconciliation_result: None,
+            reconciled_at: None,
             claim_token: None,
             lease_expires_at: None,
             rendered_metadata: None,

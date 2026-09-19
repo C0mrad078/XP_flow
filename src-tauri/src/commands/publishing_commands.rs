@@ -2,6 +2,7 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::application::provider_rate_limit_service::ProviderRateLimitStatus;
+use crate::domain::publication::Publication;
 use crate::domain::publishing::{ApprovalSource, PublicationAttempt};
 use crate::domain::readiness::ReadinessIssue;
 use crate::error::AppError;
@@ -31,7 +32,29 @@ pub async fn retry_publication(
 ) -> Result<(), AppError> {
     Ok(state
         .publishing_engine_service
-        .publish_now(publication_id)
+        .retry_publication(publication_id)
+        .await?)
+}
+
+#[tauri::command]
+pub async fn reconcile_publication(
+    state: State<'_, AppState>,
+    publication_id: Uuid,
+) -> Result<String, AppError> {
+    Ok(state
+        .publishing_engine_service
+        .reconcile_publication(publication_id)
+        .await?)
+}
+
+#[tauri::command]
+pub async fn create_publication_repost(
+    state: State<'_, AppState>,
+    publication_id: Uuid,
+) -> Result<Publication, AppError> {
+    Ok(state
+        .publishing_engine_service
+        .create_repost(publication_id)
         .await?)
 }
 

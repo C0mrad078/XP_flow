@@ -18,6 +18,8 @@ import type {
 export const publishingApi = {
   publishNow: (publicationId: UUID) => invoke<void>("publish_now", { publicationId }),
   retry: (publicationId: UUID) => invoke<void>("retry_publication", { publicationId }),
+  reconcile: (publicationId: UUID) => invoke<string>("reconcile_publication", { publicationId }),
+  repost: (publicationId: UUID) => invoke<Publication>("create_publication_repost", { publicationId }),
   attempts: (publicationId: UUID) =>
     invoke<PublicationAttempt[]>("get_publication_attempts", { publicationId }),
   readiness: (publicationId: UUID) =>

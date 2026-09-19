@@ -69,6 +69,10 @@ export interface Publication {
    * a typed error — check this (never `last_error`'s prose) to detect
    * "UNKNOWN_REMOTE_RESULT" and refuse blind retry for it. */
   last_error_code: string | null;
+  execution_key?: UUID | null;
+  repost_of_publication_id?: UUID | null;
+  reconciliation_result?: string | null;
+  reconciled_at?: ISODateTime | null;
   created_at: ISODateTime;
   updated_at: ISODateTime;
 }

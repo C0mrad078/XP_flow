@@ -31,12 +31,12 @@ YouTube creates a resumable URL, sends 8 MiB chunks, obtains the video ID from t
 
 ## Persistence and safety findings
 
-- SQLite's conditional `try_claim_due` prevents concurrent claims of the same publication. `execution_key` is retained by `COALESCE` on retry and tested across repository reads. It is a local identity; YouTube does not accept it as a remote idempotency key. A deliberately fresh repost flow is not implemented.
+- SQLite's conditional `try_claim_due` prevents concurrent claims of the same publication. `execution_key` is retained by `COALESCE` on retry and tested across repository reads. It is a local identity; YouTube does not accept it as a remote idempotency key. Phase 6's explicit repost flow creates a linked row and a fresh execution identity.
 - Attempts have a unique `(publication_id, attempt_number)` constraint and persisted provider, timestamps, status, errors and remote operation ID. The attempt table has no separate execution-key column; the publication row carries that identity.
-- The resumable session is now persisted with a conservative `transferring` state before the first upload request. The former code stored an `initialized` session and only updated it after upload returned, so a crash after a provider write could be misread as safe to restart. An ambiguous upload error is now `UNKNOWN_REMOTE_RESULT`, is not automatically requeued, and a direct backend `publish_now` call also refuses it.
+- The resumable session is now persisted with a conservative `transferring` state before the first upload request. The former code stored an `initialized` session and only updated it after upload returned, so a crash after a provider write could be misread as safe to restart. An ambiguous upload error is now `UNKNOWN_REMOTE_RESULT`, is not automatically requeued, and both Publish Now and Retry refuse it until reconciliation.
 - An unavailable YouTube resumable session (`404`) after a possible write is now treated as an unknown remote result. A missing session URL cannot prove the final video was never created. A focused uploader test covers this case.
 - Processing status polls now close the corresponding persisted attempt on confirmed success/failure. Recovery does the same when it confirms terminal remote success/failure.
-- Live progress events are transient. The session's byte offset is currently checkpointed when `upload_media` returns, not after every acknowledged chunk. Restart recovery uses the provider's resumable session probe rather than trusting that offset. A session URL must remain valid for automatic reconciliation; unresolved results fail closed.
+- Live progress events are transient. Phase 6 adds monotonic SQLite checkpoints at bounded byte/time intervals, while restart recovery still uses the provider's resumable session probe rather than trusting the offset. A session URL must remain valid for automatic reconciliation; unresolved results fail closed.
 - Rate state and retry timing are stored in SQLite. Publish scans run every 30 seconds and processing polls every 60 seconds. `Retry-After` delay-seconds is parsed; HTTP-date is not supported and falls back to normal retry policy.
 
 ## Authentication and manual verification
@@ -51,10 +51,16 @@ For a real YouTube smoke test: launch the packaged app; connect a Google account
 - RG-03 needs native macOS visual access. The permission preflight reported Screen Recording denied during this pass.
 - RG-04 needs Windows runtime evidence; it was not manually exercised on this macOS machine.
 - This checkout has no `.github/workflows` directory, so no repository Windows CI result was available as substitute evidence.
-- There is no explicit safe reconciliation action for a failed `UNKNOWN_REMOTE_RESULT`; the backend now blocks blind retry. Manual provider inspection may be needed to resolve such a publication.
-- There is no explicit fresh-execution repost command. This is a future domain action, not part of this verification pass.
+- Phase 6 adds a safe, idempotent Reconcile action for `UNKNOWN_REMOTE_RESULT`, plus an explicit confirmed Repost action with a fresh execution identity. These controls are documented separately in [publishing-recovery-controls.md](publishing-recovery-controls.md).
 
 These release gates remain pending in [release-validation.md](release-validation.md). Phase 5.2 engineering is complete.
+
+## Phase 6 relationship
+
+Phase 6 extends the completed publishing hardening with operator recovery
+controls. Retry, Reconcile and Repost are documented in
+[publishing-recovery-controls.md](publishing-recovery-controls.md). No release
+gate is being reclassified by that work.
 
 ## Continued verification on 2026-09-18
 

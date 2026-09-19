@@ -78,6 +78,12 @@ fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<UploadSession, Domain
 
 #[async_trait]
 impl UploadSessionRepository for SqliteUploadSessionRepository {
+    async fn checkpoint_bytes(&self, id: Uuid, acknowledged: i64) -> DomainResult<()> {
+        sqlx::query("UPDATE upload_sessions SET bytes_committed = MAX(bytes_committed, ?), updated_at = ? WHERE id = ?")
+            .bind(acknowledged.max(0)).bind(chrono::Utc::now().to_rfc3339())
+            .bind(id.to_string()).execute(&self.pool).await.map_err(map_repo_err)?;
+        Ok(())
+    }
     async fn create(&self, session: &UploadSession) -> DomainResult<()> {
         sqlx::query(
             "INSERT INTO upload_sessions (id, publication_id, attempt_id, provider, session_type, remote_session_id, \
@@ -108,7 +114,7 @@ impl UploadSessionRepository for SqliteUploadSessionRepository {
     async fn update(&self, session: &UploadSession) -> DomainResult<()> {
         sqlx::query(
             "UPDATE upload_sessions SET remote_session_id = ?, remote_upload_url = ?, remote_publish_id = ?, \
-             remote_upload_token = ?, bytes_total = ?, bytes_committed = ?, expires_at = ?, state = ?, updated_at = ? \
+             remote_upload_token = ?, bytes_total = ?, bytes_committed = MAX(bytes_committed, ?), expires_at = ?, state = ?, updated_at = ? \
              WHERE id = ?",
         )
         .bind(&session.remote_session_id)

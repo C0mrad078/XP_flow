@@ -178,6 +178,8 @@ pub fn run() {
             commands::publication_commands::reorder_queue,
             commands::publishing_commands::publish_now,
             commands::publishing_commands::retry_publication,
+            commands::publishing_commands::reconcile_publication,
+            commands::publishing_commands::create_publication_repost,
             commands::publishing_commands::get_publication_attempts,
             commands::publishing_commands::get_publication_readiness,
             commands::publishing_commands::record_publication_consent,

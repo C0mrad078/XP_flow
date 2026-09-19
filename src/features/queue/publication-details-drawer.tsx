@@ -34,6 +34,8 @@ import {
   usePublishNow,
   useRecordPublicationConsent,
   useRetryPublication,
+  useReconcilePublication,
+  useRepostPublication,
   useUpdatePublicationMetadata,
 } from "@/hooks/use-publishing";
 import { usePublicationProgress } from "@/hooks/use-publish-progress";
@@ -86,6 +88,8 @@ function DetailBody({ publication, onClose }: { publication: Publication; onClos
   const metadata = usePublicationMetadata(publication.id);
   const publishNow = usePublishNow();
   const retry = useRetryPublication();
+  const reconcile = useReconcilePublication();
+  const repost = useRepostPublication();
   const consent = useRecordPublicationConsent();
   const updateMetadata = useUpdatePublicationMetadata();
 
@@ -174,21 +178,44 @@ function DetailBody({ publication, onClose }: { publication: Publication; onClos
     });
   }
 
+  async function handleRepost() {
+    const confirmed = await confirmAction({
+      title: "Create a new publication?",
+      description: `Reposting “${publication.title}” creates a separate external publication with a new execution identity. The original and its history remain intact.`,
+      confirmLabel: "Create repost",
+    });
+    if (!confirmed) return;
+    repost.mutate(publication.id, {
+      onSuccess: () => toast({ variant: "success", title: "Repost added to queue" }),
+      onError: (error) =>
+        toast({
+          variant: "error",
+          title: "Couldn't repost",
+          description: isAppError(error) ? error.user_message : undefined,
+        }),
+    });
+  }
+
   /** Section 65 — a plain, non-secret publishing snapshot for a support
    * request. `remote_operation_id` is the provider's own post/video id
    * (safe — it's what a support agent needs to look the post up), never
    * an access token, upload URL/token or authorization header. */
   async function handleCopyDiagnostics() {
     const attemptsList = attempts.data ?? [];
-    const latest = attemptsList[attemptsList.length - 1];
+    const latest = attemptsList[0];
     const diagnostics = {
       publication_id: publication.id,
+      execution_key: publication.execution_key,
+      repost_of_publication_id: publication.repost_of_publication_id,
+      attempt_count: attemptsList.length,
       attempt_id: latest?.id ?? null,
       platform: publication.platform,
       status: publication.status,
       remote_state: latest?.status ?? null,
       remote_operation_id: latest?.remote_operation_id ?? publication.remote_id,
       error_code: publication.last_error_code,
+      reconciliation_result: publication.reconciliation_result,
+      reconciled_at: publication.reconciled_at,
       rate_limit: rateState.data?.filter((state) => state.limited_until) ?? [],
       readiness_reasons: readiness.data ?? [],
     };
@@ -198,9 +225,7 @@ function DetailBody({ publication, onClose }: { publication: Publication; onClos
 
   const canSchedule = publication.status === "queued" || publication.status === "scheduled";
   const canCancel = publication.status !== "cancelled" && publication.status !== "archived";
-  const canPublishNow = ["queued", "scheduled", "failed", "rate_limited", "auth_required", "paused"].includes(
-    publication.status,
-  );
+  const canPublishNow = ["queued", "scheduled", "auth_required", "paused"].includes(publication.status);
   const canRetry = publication.status === "failed" || publication.status === "rate_limited";
   const needsConsent = readiness.data?.includes("consent_required");
   // Section 66/67: this is the one case a plain "Retry" must never be
@@ -209,7 +234,7 @@ function DetailBody({ publication, onClose }: { publication: Publication; onClos
   // stable error code, never status (no PublicationStatus value is ever
   // set specifically for this) or last_error's free text.
   const needsVerification = publication.last_error_code === UNKNOWN_REMOTE_RESULT_CODE;
-  const latestAttempt = attempts.data?.[attempts.data.length - 1];
+  const latestAttempt = attempts.data?.[0];
   const liveProgress = usePublicationProgress(publication.id);
   // Live events (section 28) update instantly; the attempt-derived value
   // is the fallback until the first event of this session arrives, and
@@ -262,6 +287,14 @@ function DetailBody({ publication, onClose }: { publication: Publication; onClos
             ? formatDateTimeInZone(publication.scheduled_at, timezone)
             : "Not scheduled"}
         </Row>
+        <Row label="Execution">{publication.execution_key ?? "Not started"}</Row>
+        {publication.repost_of_publication_id && (
+          <Row label="Repost of">{publication.repost_of_publication_id}</Row>
+        )}
+        {publication.remote_id && <Row label="Remote ID">{publication.remote_id}</Row>}
+        {publication.reconciliation_result && (
+          <Row label="Reconciliation">{publication.reconciliation_result.split("_").join(" ")}</Row>
+        )}
         <Row label="Locked">
           <Button
             variant="outline"
@@ -366,6 +399,33 @@ function DetailBody({ publication, onClose }: { publication: Publication; onClos
           <Button size="sm" variant="outline" onClick={handleRetry} disabled={retry.isPending}>
             <RefreshCcw className="size-3.5" />
             Retry
+          </Button>
+        )}
+        {needsVerification && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() =>
+              reconcile.mutate(publication.id, {
+                onSuccess: (result) =>
+                  toast({ variant: "success", title: `Reconciliation: ${result.split("_").join(" ")}` }),
+                onError: (error) =>
+                  toast({
+                    variant: "error",
+                    title: "Couldn't reconcile",
+                    description: isAppError(error) ? error.user_message : undefined,
+                  }),
+              })
+            }
+            disabled={reconcile.isPending}
+          >
+            <RefreshCcw className="size-3.5" />
+            Reconcile
+          </Button>
+        )}
+        {(publication.status === "published" || publication.status === "failed") && (
+          <Button size="sm" variant="outline" onClick={handleRepost} disabled={repost.isPending}>
+            Repost
           </Button>
         )}
         {needsConsent && (

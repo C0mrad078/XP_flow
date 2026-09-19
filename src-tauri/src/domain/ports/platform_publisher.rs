@@ -118,6 +118,23 @@ pub trait PlatformPublisher: Send + Sync {
         session: &UploadSession,
     ) -> Result<RemoteUploadState, PublishError>;
 
+    /// Inspect existing remote evidence without uploading media or creating
+    /// a publication. Providers without a read-only session probe remain
+    /// ambiguous unless a known remote ID can be queried.
+    async fn reconcile_remote(
+        &self,
+        access_token: &str,
+        session: &UploadSession,
+    ) -> Result<UploadSession, PublishError> {
+        let mut result = session.clone();
+        result.state = if session.remote_publish_id.is_some() {
+            self.get_remote_status(access_token, session).await?
+        } else {
+            RemoteUploadState::RemoteUnknown
+        };
+        Ok(result)
+    }
+
     /// Given a persisted, possibly-stale session (loaded after a crash or
     /// an ambiguous failure), verifies real remote state and — where
     /// possible — resumes and completes the transfer from the last

@@ -171,6 +171,24 @@ pub struct ExecutionStateUpdate {
 #[async_trait]
 pub trait PublicationRepository: Send + Sync {
     async fn create(&self, publication: &Publication) -> DomainResult<()>;
+    /// A database lease serializes operator reconciliation across workers.
+    /// An abandoned lease can be reclaimed after `stale_before`.
+    async fn try_begin_reconciliation(
+        &self,
+        id: Uuid,
+        token: &str,
+        stale_before: DateTime<Utc>,
+    ) -> DomainResult<bool>;
+    /// Complete only if this caller still owns the reconciliation lease.
+    async fn finish_reconciliation(
+        &self,
+        id: Uuid,
+        token: &str,
+        status: crate::domain::publication::PublicationStatus,
+        remote_id: Option<String>,
+        result: &str,
+        last_error_code: Option<&str>,
+    ) -> DomainResult<bool>;
     /// Persists every field *except* `execution_key`/`claim_token`/
     /// `lease_expires_at`/`rendered_metadata_json` (section 13/66's
     /// correctness requirement, added after an audit finding: a generic
@@ -402,6 +420,9 @@ pub trait PublicationAttemptRepository: Send + Sync {
 pub trait UploadSessionRepository: Send + Sync {
     async fn create(&self, session: &UploadSession) -> DomainResult<()>;
     async fn update(&self, session: &UploadSession) -> DomainResult<()>;
+    /// Monotonic provider-acknowledged byte checkpoint; never rewinds a
+    /// session when a slower progress event arrives after a newer one.
+    async fn checkpoint_bytes(&self, id: Uuid, acknowledged: i64) -> DomainResult<()>;
     async fn get(&self, id: Uuid) -> DomainResult<Option<UploadSession>>;
     /// The most recent session for a publication — what a crash-recovery
     /// pass loads first (section 88).

@@ -402,6 +402,62 @@ impl PlatformPublisher for YouTubeUploader {
         })
     }
 
+    async fn reconcile_remote(
+        &self,
+        access_token: &str,
+        session: &UploadSession,
+    ) -> Result<UploadSession, PublishError> {
+        let mut result = session.clone();
+        if result.remote_publish_id.is_some() {
+            result.state = self.get_remote_status(access_token, session).await?;
+            return Ok(result);
+        }
+        let Some(upload_url) = &session.remote_upload_url else {
+            result.state = RemoteUploadState::RemoteUnknown;
+            return Ok(result);
+        };
+        let Some(total) = session.bytes_total else {
+            result.state = RemoteUploadState::RemoteUnknown;
+            return Ok(result);
+        };
+        // The zero-byte resumable status probe cannot create a video or
+        // transfer media. An expired/404 session proves no such thing.
+        let response = self
+            .http
+            .put(upload_url)
+            .bearer_auth(access_token)
+            .header("Content-Length", "0")
+            .header("Content-Range", format!("bytes */{total}"))
+            .timeout(UPLOAD_CONTROL_TIMEOUT)
+            .send()
+            .await
+            .map_err(map_transport_err)?;
+        match response.status().as_u16() {
+            308 => {
+                result.bytes_committed = response
+                    .headers()
+                    .get("range")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(parse_range_upper_bound)
+                    .map(|upper| upper + 1)
+                    .unwrap_or(0);
+                result.state = RemoteUploadState::Transferring;
+            }
+            200 | 201 => {
+                let resource = response
+                    .json::<VideoResource>()
+                    .await
+                    .map_err(|_| PublishError::UnknownRemoteResult)?;
+                result.remote_publish_id = Some(resource.id);
+                result.bytes_committed = total;
+                result.state = self.get_remote_status(access_token, &result).await?;
+            }
+            404 | 410 => result.state = RemoteUploadState::RemoteUnknown,
+            _ => return Err(classify_response(&response)),
+        }
+        Ok(result)
+    }
+
     async fn recover_upload(
         &self,
         access_token: &str,

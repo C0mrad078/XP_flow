@@ -69,6 +69,20 @@ export function useRetryPublication() {
     onSuccess: (_, id) => invalidatePublication(qc, id),
   });
 }
+export function useReconcilePublication() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: UUID) => publishingApi.reconcile(id),
+    onSuccess: (_, id) => invalidatePublication(qc, id),
+  });
+}
+export function useRepostPublication() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: UUID) => publishingApi.repost(id),
+    onSuccess: (_, id) => invalidatePublication(qc, id),
+  });
+}
 export function useRecordPublicationConsent() {
   const qc = useQueryClient();
   return useMutation({
