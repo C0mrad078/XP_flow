@@ -13,8 +13,9 @@ or cancelling a queued item cannot silently race a worker claim.
 
 Queue operations retain the Phase 6 safety rules: Retry continues an existing
 execution, Reconcile is read-only remote inspection, and Repost is a confirmed
-new execution. Bulk external operations such as Repost and ambiguous
-Reconcile are intentionally not exposed.
+new execution. The backend provides a transactional bulk pause/resume operation
+for queued publications; Repost and ambiguous Reconcile are intentionally not
+bulk operations.
 
 The publishing concurrency setting is persisted and validated. The current
 worker semaphore is sized during application startup; changing the value is

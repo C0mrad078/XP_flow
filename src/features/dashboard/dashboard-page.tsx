@@ -17,11 +17,13 @@ import { formatRelativeTime, formatTimeInZone } from "@/lib/formatting/date";
 import { mockPlatformOverview, mockViewsSeries } from "@/development/mock-data/dashboard";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import type { ActivityEvent } from "@/types/domain";
+import { usePublishingSettings } from "@/hooks/use-publishing";
 
 export function DashboardPage() {
   const [activity, setActivity] = useState<ActivityEvent[]>([]);
   const timezone = useWorkspaceStore((state) => state.workspace?.timezone ?? "UTC");
   const { data: channels = [] } = useChannels();
+  const { data: publishingSettings } = usePublishingSettings();
   const channelNames = new Map(channels.map((c) => [c.id, c.name]));
   const { data: queuePage } = useQueueList({
     statuses: [
@@ -100,6 +102,24 @@ export function DashboardPage() {
           </CardContent>
         </Card>
       </div>
+
+      <Card>
+        <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
+          <div>
+            <p className="text-body-small font-medium text-foreground">Scheduler health</p>
+            <p className="text-caption normal-case tracking-normal text-muted-foreground">
+              {publishingSettings?.paused
+                ? "Paused by workspace settings"
+                : publishingSettings?.enabled === false
+                  ? "Disabled by workspace settings"
+                  : "Running on the persisted schedule"}
+            </p>
+          </div>
+          <span className="font-mono-data text-body-small text-foreground">
+            {publishingSettings?.max_concurrent_uploads ?? "—"} upload slots
+          </span>
+        </CardContent>
+      </Card>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
         <Card className="xl:col-span-2">

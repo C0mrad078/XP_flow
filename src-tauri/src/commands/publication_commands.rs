@@ -171,6 +171,18 @@ pub async fn set_publication_locked(
 }
 
 #[tauri::command]
+pub async fn bulk_set_publications_paused(
+    state: State<'_, AppState>,
+    publication_ids: Vec<Uuid>,
+    paused: bool,
+) -> Result<Vec<Publication>, AppError> {
+    Ok(state
+        .publication_service
+        .bulk_set_paused(&publication_ids, paused)
+        .await?)
+}
+
+#[tauri::command]
 pub async fn reorder_queue(
     state: State<'_, AppState>,
     ordered_publication_ids: Vec<Uuid>,

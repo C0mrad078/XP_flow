@@ -214,6 +214,30 @@ impl PublicationService {
         Ok(publication)
     }
 
+    /// Transactional operator pause/resume for queued work. Executing rows
+    /// cannot transition, so a concurrent claim causes the whole batch to
+    /// fail instead of partially changing operator intent.
+    pub async fn bulk_set_paused(
+        &self,
+        ids: &[Uuid],
+        paused: bool,
+    ) -> DomainResult<Vec<Publication>> {
+        let mut publications = Vec::with_capacity(ids.len());
+        for id in ids {
+            let mut publication = self.load(*id).await?;
+            let target = if paused {
+                PublicationStatus::Paused
+            } else {
+                PublicationStatus::Queued
+            };
+            publication.transition(target)?;
+            publication.updated_at = chrono::Utc::now();
+            publications.push(publication);
+        }
+        self.publication_repo.bulk_update(&publications).await?;
+        Ok(publications)
+    }
+
     /// Reassigns manual queue positions for the given publications, in the
     /// order supplied (section 15's drag-reorder for unscheduled items).
     /// `position` carries no uniqueness constraint (it is an ordering hint,

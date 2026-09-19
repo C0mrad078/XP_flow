@@ -175,6 +175,7 @@ pub fn run() {
             commands::publication_commands::archive_publication,
             commands::publication_commands::set_publication_priority,
             commands::publication_commands::set_publication_locked,
+            commands::publication_commands::bulk_set_publications_paused,
             commands::publication_commands::reorder_queue,
             commands::publishing_commands::publish_now,
             commands::publishing_commands::retry_publication,

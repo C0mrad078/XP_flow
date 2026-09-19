@@ -111,6 +111,14 @@ export function useSetPublicationLocked() {
   });
 }
 
+export function useBulkSetPublicationsPaused() {
+  const invalidate = useInvalidateQueue();
+  return useMutation({
+    mutationFn: ({ ids, paused }: { ids: UUID[]; paused: boolean }) => queueApi.bulkSetPaused(ids, paused),
+    onSuccess: invalidate,
+  });
+}
+
 export function useReorderQueue() {
   const invalidate = useInvalidateQueue();
   return useMutation({

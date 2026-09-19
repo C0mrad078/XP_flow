@@ -44,5 +44,7 @@ export const queueApi = {
   setPriority: (id: UUID, priority: VideoPriority) =>
     invoke<Publication>("set_publication_priority", { id, priority }),
   setLocked: (id: UUID, locked: boolean) => invoke<Publication>("set_publication_locked", { id, locked }),
+  bulkSetPaused: (publicationIds: UUID[], paused: boolean) =>
+    invoke<Publication[]>("bulk_set_publications_paused", { publicationIds, paused }),
   reorder: (orderedPublicationIds: UUID[]) => invoke<void>("reorder_queue", { orderedPublicationIds }),
 };
